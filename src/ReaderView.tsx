@@ -1224,6 +1224,16 @@ export default function ReaderView({
           >
             <ArrowLeft size={16} />
           </button>
+          {toc.length > 0 && (
+            <button
+              type="button"
+              className={`topbar__icon-btn ${showToc ? 'is-active' : ''}`}
+              title="目录"
+              onClick={() => setShowToc((visible) => !visible)}
+            >
+              <ListTree size={15} />
+            </button>
+          )}
           <div className="topbar__doc">
             <span className="topbar__title" data-tauri-drag-region>
               {bookTitle}
@@ -1312,17 +1322,6 @@ export default function ReaderView({
           </button>
 
           <span className="topbar__divider" />
-
-          {toc.length > 0 && (
-            <button
-              type="button"
-              className={`topbar__icon-btn ${showToc ? 'is-active' : ''}`}
-              title="目录"
-              onClick={() => setShowToc((visible) => !visible)}
-            >
-              <ListTree size={15} />
-            </button>
-          )}
 
           <button
             type="button"

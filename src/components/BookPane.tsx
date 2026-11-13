@@ -390,24 +390,50 @@ const EpubImage: React.FC<EpubImageProps> = ({
 }) => {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const blobRef = useRef<Blob | null>(null);
-  const [isVisible, setIsVisible] = useState(false);
+  const objectUrlRef = useRef<string | null>(null);
+  // 只在首次进入视口时触发一次加载；滚出视口后保留已加载的图片，
+  // 避免它被卸载又重载，导致书页高度反复变化（闪烁 + 卡片错位）。
+  const [shouldLoad, setShouldLoad] = useState(false);
   const [src, setSrc] = useState<string | null>(paragraph.imageSrc ?? null);
   const [failed, setFailed] = useState(false);
 
+  // 卸载时释放唯一的 object URL
   useEffect(() => {
-    if (paragraph.imageSrc) return;
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (paragraph.imageSrc) {
+      blobRef.current = null;
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+      setSrc(paragraph.imageSrc);
+      setFailed(false);
+      setShouldLoad(false);
+      return;
+    }
+
+    if (shouldLoad) return;
 
     const el = wrapperRef.current;
     const root = scrollContainerRef.current;
     if (!el || !root) {
-      setIsVisible(true);
+      setShouldLoad(true);
       return;
     }
 
     const observer = new IntersectionObserver(
       (entries) => {
-        for (const entry of entries) {
-          setIsVisible(entry.isIntersecting);
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setShouldLoad(true);
+          observer.disconnect();
         }
       },
       {
@@ -418,29 +444,31 @@ const EpubImage: React.FC<EpubImageProps> = ({
 
     observer.observe(el);
     return () => observer.disconnect();
-  }, [paragraph.imageSrc, scrollContainerRef]);
+  }, [paragraph.imageSrc, scrollContainerRef, shouldLoad]);
 
   useEffect(() => {
-    if (!isVisible || !paragraph.imagePath) return;
+    if (!shouldLoad || paragraph.imageSrc || !paragraph.imagePath) return;
     if (!loader) {
       setFailed(true);
       return;
     }
 
     let cancelled = false;
-    let objectUrl: string | null = null;
     setFailed(false);
 
     loader
       .readImage(paragraph.imagePath)
       .then((blob) => {
-        if (cancelled || !blob) {
-          if (!cancelled) setFailed(true);
+        if (cancelled) return;
+        if (!blob) {
+          setFailed(true);
           return;
         }
         blobRef.current = blob;
-        objectUrl = URL.createObjectURL(blob);
-        setSrc(objectUrl);
+        if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+        const url = URL.createObjectURL(blob);
+        objectUrlRef.current = url;
+        setSrc(url);
       })
       .catch(() => {
         if (!cancelled) setFailed(true);
@@ -448,17 +476,8 @@ const EpubImage: React.FC<EpubImageProps> = ({
 
     return () => {
       cancelled = true;
-      blobRef.current = null;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      setSrc(null);
     };
-  }, [isVisible, loader, paragraph.imagePath]);
-
-  useEffect(() => {
-    blobRef.current = null;
-    setSrc(paragraph.imageSrc ?? null);
-    setFailed(false);
-  }, [paragraph.imageSrc, paragraph.imagePath]);
+  }, [shouldLoad, loader, paragraph.imagePath, paragraph.imageSrc]);
 
   const aspectRatio =
     paragraph.imageWidth && paragraph.imageHeight
@@ -473,15 +492,18 @@ const EpubImage: React.FC<EpubImageProps> = ({
       ref={wrapperRef}
       className={`book-epub-image ${
         isInlineImage ? 'book-epub-image--inline' : ''
-      }`}
+      } ${!isInlineImage && aspectRatio ? 'book-epub-image--sized' : ''}`}
       data-paragraph-id={paragraph.id}
+      style={
+        !isInlineImage && aspectRatio ? { aspectRatio } : undefined
+      }
     >
       {src ? (
         <img
           className="book-epub-image__img"
           src={src}
           alt={paragraph.imageAlt || ''}
-          loading="lazy"
+          loading="eager"
           decoding="async"
           title={onPreviewImage ? '点击放大查看' : undefined}
           style={

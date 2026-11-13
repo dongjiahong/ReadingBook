@@ -387,6 +387,23 @@ body,
   cursor: zoom-in;
 }
 
+/* Wrapper 已按 EPUB 元数据锁定宽高比时，让图片/占位填满该区域，
+   避免加载完成后的二次布局跳动。 */
+.book-epub-image--sized {
+  overflow: hidden;
+}
+
+.book-epub-image--sized .book-epub-image__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.book-epub-image--sized .book-epub-image__placeholder {
+  height: 100%;
+  min-height: 0;
+}
+
 .book-epub-image--inline {
   display: inline-block;
   width: auto;
