@@ -30,6 +30,8 @@ interface BookPaneProps {
     endOffset: number;
     style: AnnotationStyle;
     anchorScreenY: number;
+    /** false 时只做基础标注，不创建卡片。 */
+    withCard?: boolean;
     linkToExistingNodeId?: string;
   }) => void;
   onClickAnchor: (anchor: BookAnchor) => void;
@@ -123,7 +125,11 @@ export const BookPane: React.FC<BookPaneProps> = ({
     });
   }, []);
 
-  const handleChooseStyle = (style: AnnotationStyle, linkToExistingNodeId?: string) => {
+  const handleChooseStyle = (
+    style: AnnotationStyle,
+    linkToExistingNodeId?: string,
+    withCard = true
+  ) => {
     if (!selectionDraft) return;
     onCreateAnnotation({
       paragraphId: selectionDraft.paragraphId,
@@ -132,6 +138,7 @@ export const BookPane: React.FC<BookPaneProps> = ({
       endOffset: selectionDraft.endOffset,
       style,
       anchorScreenY: selectionDraft.anchorScreenY,
+      withCard,
       linkToExistingNodeId,
     });
     window.getSelection()?.removeAllRanges();
@@ -342,19 +349,39 @@ export const BookPane: React.FC<BookPaneProps> = ({
           <button
             type="button"
             className="selection-popover__btn selection-popover__btn--review"
-            onClick={() => handleChooseStyle('highlight')}
+            title="只在书页上高亮，不创建卡片"
+            onClick={() => handleChooseStyle('highlight', undefined, false)}
           >
             <Highlighter size={14} />
-            <span>高亮新建</span>
+            <span>仅高亮</span>
+          </button>
+          <button
+            type="button"
+            className="selection-popover__btn selection-popover__btn--revision"
+            title="只在书页上划线，不创建卡片"
+            onClick={() => handleChooseStyle('underline', undefined, false)}
+          >
+            <Underline size={14} />
+            <span>仅划线</span>
           </button>
           <div className="selection-popover__sep" />
           <button
             type="button"
+            className="selection-popover__btn selection-popover__btn--review"
+            title="高亮并创建批注卡片"
+            onClick={() => handleChooseStyle('highlight', undefined, true)}
+          >
+            <Highlighter size={14} />
+            <span>高亮+卡</span>
+          </button>
+          <button
+            type="button"
             className="selection-popover__btn selection-popover__btn--revision"
-            onClick={() => handleChooseStyle('underline')}
+            title="划线并创建批注卡片"
+            onClick={() => handleChooseStyle('underline', undefined, true)}
           >
             <Underline size={14} />
-            <span>划线新建</span>
+            <span>划线+卡</span>
           </button>
           {selectedCardId && (
             <>

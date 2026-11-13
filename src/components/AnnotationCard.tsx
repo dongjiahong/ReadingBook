@@ -54,6 +54,14 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
     adjustTextareaHeight();
   }, [body, images.length, adjustTextareaHeight]);
 
+  // 仅图片卡片在未选中且无文字时收起文字行，选中后重新显示以便输入。
+  const hasBody = body.trim().length > 0;
+  const showTextRow = hasBody || images.length === 0 || isSelected;
+
+  useLayoutEffect(() => {
+    onLayoutChange();
+  }, [isSelected, onLayoutChange]);
+
   // Drag card to reposition anywhere on the unified right-side infinite canvas
   const handleCardMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
@@ -241,20 +249,30 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
 
       {/* Minimalist Content Area */}
       <div className="anno-card__content">
-        <div className="anno-card__text-row">
-          {badgeNumber !== undefined && (
-            <span className={`anno-badge anno-badge--${kind}`}>{badgeNumber}</span>
-          )}
-          <textarea
-            ref={textareaRef}
-            className="anno-card__textarea"
-            value={body}
-            rows={1}
-            placeholder="输入笔记，支持粘贴截图或拖入图片..."
-            onPaste={handlePaste}
-            onChange={(e) => onChangeBody(id, e.target.value)}
-          />
-        </div>
+        {showTextRow ? (
+          <div className="anno-card__text-row">
+            {badgeNumber !== undefined && (
+              <span className={`anno-badge anno-badge--${kind}`}>{badgeNumber}</span>
+            )}
+            <textarea
+              ref={textareaRef}
+              className="anno-card__textarea"
+              value={body}
+              rows={1}
+              placeholder="输入笔记，支持粘贴截图或拖入图片..."
+              onPaste={handlePaste}
+              onChange={(e) => onChangeBody(id, e.target.value)}
+            />
+          </div>
+        ) : (
+          badgeNumber !== undefined && (
+            <span
+              className={`anno-badge anno-badge--${kind} anno-badge--floating`}
+            >
+              {badgeNumber}
+            </span>
+          )
+        )}
 
         {images.length > 0 && (
           <div className="anno-card__images">

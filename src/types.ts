@@ -22,7 +22,8 @@ export interface BookAnchor {
   style: AnnotationStyle;
   badgeNumber: number;
   kind: CardKind;
-  targetNodeId: string;
+  /** 关联的批注卡片；基础标注（仅高亮/划线）没有卡片。 */
+  targetNodeId?: string;
 }
 
 export interface CardImage {

@@ -80,6 +80,8 @@ interface PdfBookPaneProps {
     rects: NormalizedPdfRect[];
     style: AnnotationStyle;
     anchorScreenY: number;
+    /** false 时只做基础标注，不创建卡片。 */
+    withCard?: boolean;
     linkToExistingNodeId?: string;
   }) => void;
   onClickAnchor: (anchor: BookAnchor) => void;
@@ -379,27 +381,71 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
           <button
             type="button"
             className="selection-popover__btn selection-popover__btn--review"
+            title="只在 PDF 上高亮，不创建卡片"
             onClick={() => {
-              onCreatePdfAnnotation({ ...selectionDraft, style: 'highlight' });
+              onCreatePdfAnnotation({
+                ...selectionDraft,
+                style: 'highlight',
+                withCard: false,
+              });
               window.getSelection()?.removeAllRanges();
               setSelectionDraft(null);
             }}
           >
             <Highlighter size={14} />
-            <span>高亮新建</span>
+            <span>仅高亮</span>
           </button>
-          <div className="selection-popover__sep" />
           <button
             type="button"
             className="selection-popover__btn selection-popover__btn--revision"
+            title="只在 PDF 上划线，不创建卡片"
             onClick={() => {
-              onCreatePdfAnnotation({ ...selectionDraft, style: 'underline' });
+              onCreatePdfAnnotation({
+                ...selectionDraft,
+                style: 'underline',
+                withCard: false,
+              });
               window.getSelection()?.removeAllRanges();
               setSelectionDraft(null);
             }}
           >
             <Underline size={14} />
-            <span>划线新建</span>
+            <span>仅划线</span>
+          </button>
+          <div className="selection-popover__sep" />
+          <button
+            type="button"
+            className="selection-popover__btn selection-popover__btn--review"
+            title="高亮并创建批注卡片"
+            onClick={() => {
+              onCreatePdfAnnotation({
+                ...selectionDraft,
+                style: 'highlight',
+                withCard: true,
+              });
+              window.getSelection()?.removeAllRanges();
+              setSelectionDraft(null);
+            }}
+          >
+            <Highlighter size={14} />
+            <span>高亮+卡</span>
+          </button>
+          <button
+            type="button"
+            className="selection-popover__btn selection-popover__btn--revision"
+            title="划线并创建批注卡片"
+            onClick={() => {
+              onCreatePdfAnnotation({
+                ...selectionDraft,
+                style: 'underline',
+                withCard: true,
+              });
+              window.getSelection()?.removeAllRanges();
+              setSelectionDraft(null);
+            }}
+          >
+            <Underline size={14} />
+            <span>划线+卡</span>
           </button>
           {selectedCardId && (
             <>

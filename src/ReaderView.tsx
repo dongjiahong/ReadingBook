@@ -420,6 +420,7 @@ export default function ReaderView({
     // 2. Measure true book anchor Y (in canvas local coordinate space) for anchored cards
     const anchorTargetYMap = new Map<string, number>();
     for (const anchor of anchors) {
+      if (!anchor.targetNodeId) continue;
       const anchorEl = bookEl.querySelector<HTMLElement>(
         `[data-anchor-id="${anchor.id}"]`
       );
@@ -1058,6 +1059,23 @@ export default function ReaderView({
     [anchors, cards, bindExistingCardToAnchor, findNonOverlappingY]
   );
 
+  // 基础标注：只在书页上留下高亮/划线，不创建右侧卡片。
+  const createPlainAnchor = useCallback(
+    (
+      anchorMeta: Omit<BookAnchor, 'id' | 'badgeNumber' | 'kind' | 'targetNodeId'>
+    ) => {
+      const newAnchor: BookAnchor = {
+        ...anchorMeta,
+        id: `anchor-${Date.now()}`,
+        badgeNumber: 0,
+        kind: anchorMeta.style === 'highlight' ? 'review' : 'revision',
+      };
+      setAnchors((prev) => [...prev, newAnchor]);
+      setActiveAnchorId(newAnchor.id);
+    },
+    []
+  );
+
   const handleCreateTextAnnotation = useCallback(
     (draft: {
       paragraphId: string;
@@ -1066,28 +1084,31 @@ export default function ReaderView({
       endOffset: number;
       style: AnnotationStyle;
       anchorScreenY: number;
+      /** false 时只做基础标注，不生成卡片。 */
+      withCard?: boolean;
       linkToExistingNodeId?: string;
     }) => {
       const para = paragraphs.find((p) => p.id === draft.paragraphId);
       const epubCfi = para?.epubCfiBase
         ? `${para.epubCfiBase}/1:${draft.startOffset}`
         : undefined;
+      const anchorMeta = {
+        docFormat,
+        paragraphId: draft.paragraphId,
+        epubCfi,
+        quote: draft.quote,
+        startOffset: draft.startOffset,
+        endOffset: draft.endOffset,
+        style: draft.style,
+      };
 
-      spawnCardForAnchor(
-        {
-          docFormat,
-          paragraphId: draft.paragraphId,
-          epubCfi,
-          quote: draft.quote,
-          startOffset: draft.startOffset,
-          endOffset: draft.endOffset,
-          style: draft.style,
-        },
-        draft.anchorScreenY,
-        draft.linkToExistingNodeId
-      );
+      if (draft.withCard === false) {
+        createPlainAnchor(anchorMeta);
+        return;
+      }
+      spawnCardForAnchor(anchorMeta, draft.anchorScreenY, draft.linkToExistingNodeId);
     },
-    [paragraphs, docFormat, spawnCardForAnchor]
+    [paragraphs, docFormat, spawnCardForAnchor, createPlainAnchor]
   );
 
   const handleCreatePdfAnnotation = useCallback(
@@ -1097,28 +1118,37 @@ export default function ReaderView({
       rects: NormalizedPdfRect[];
       style: AnnotationStyle;
       anchorScreenY: number;
+      /** false 时只做基础标注，不生成卡片。 */
+      withCard?: boolean;
       linkToExistingNodeId?: string;
     }) => {
-      spawnCardForAnchor(
-        {
-          docFormat: 'pdf',
-          paragraphId: `pdf-page-${draft.pageNumber}`,
-          pdfPage: draft.pageNumber,
-          pdfRects: draft.rects,
-          quote: draft.quote,
-          startOffset: 0,
-          endOffset: draft.quote.length,
-          style: draft.style,
-        },
-        draft.anchorScreenY,
-        draft.linkToExistingNodeId
-      );
+      const anchorMeta = {
+        docFormat: 'pdf' as const,
+        paragraphId: `pdf-page-${draft.pageNumber}`,
+        pdfPage: draft.pageNumber,
+        pdfRects: draft.rects,
+        quote: draft.quote,
+        startOffset: 0,
+        endOffset: draft.quote.length,
+        style: draft.style,
+      };
+
+      if (draft.withCard === false) {
+        createPlainAnchor(anchorMeta);
+        return;
+      }
+      spawnCardForAnchor(anchorMeta, draft.anchorScreenY, draft.linkToExistingNodeId);
     },
-    [spawnCardForAnchor]
+    [spawnCardForAnchor, createPlainAnchor]
   );
 
   const handleClickBookAnchor = useCallback((anchor: BookAnchor) => {
     setActiveAnchorId(anchor.id);
+    // 基础标注没有关联卡片，点击只高亮书籍原文。
+    if (!anchor.targetNodeId) {
+      setSelectedCardId(null);
+      return;
+    }
     setSelectedCardId(anchor.targetNodeId);
     const cardEl = canvasRef.current?.querySelector<HTMLElement>(
       `[data-card-id="${anchor.targetNodeId}"]`
