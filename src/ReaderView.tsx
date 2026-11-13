@@ -19,12 +19,6 @@ import {
   type MidLineRoutingMode,
 } from './components/BookToCanvasBridge';
 import { PdfBookPane, type PdfSource } from './components/PdfBookPane';
-import {
-  INITIAL_ANCHORS,
-  INITIAL_CARD_EDGES,
-  INITIAL_CARDS,
-  SAMPLE_BOOK_PARAGRAPHS,
-} from './data/sampleBook';
 import type {
   AnnotationCardItem,
   AnnotationStyle,
@@ -39,7 +33,6 @@ import type {
   ReaderSettings,
   TocEntry,
 } from './types';
-import { DEMO_BOOK } from './data/demoBook';
 import { invoke } from '@tauri-apps/api/core';
 import { loadAnnotations, saveAnnotations } from './services/db';
 import { EpubImageLoader, parseEpubFile } from './utils/epubLoader';
@@ -102,9 +95,9 @@ export default function ReaderView({
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [showToc, setShowToc] = useState(false);
 
-  const [docFormat, setDocFormat] = useState<DocFormat>('demo');
-  const [bookTitle, setBookTitle] = useState<string>('Hamlet · Act III, Scene 1');
-  const [paragraphs, setParagraphs] = useState<BookParagraph[]>(SAMPLE_BOOK_PARAGRAPHS);
+  const [docFormat, setDocFormat] = useState<DocFormat>('epub');
+  const [bookTitle, setBookTitle] = useState<string>('');
+  const [paragraphs, setParagraphs] = useState<BookParagraph[]>([]);
   const [pdfSource, setPdfSource] = useState<PdfSource | null>(null);
   const [pdfScale, setPdfScale] = useState<number>(1.0);
   const [epubImageLoader, setEpubImageLoader] = useState<EpubImageLoader | null>(
@@ -112,9 +105,9 @@ export default function ReaderView({
   );
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [anchors, setAnchors] = useState<BookAnchor[]>(INITIAL_ANCHORS);
-  const [cards, setCards] = useState<AnnotationCardItem[]>(INITIAL_CARDS);
-  const [edges, setEdges] = useState<CardEdge[]>(INITIAL_CARD_EDGES);
+  const [anchors, setAnchors] = useState<BookAnchor[]>([]);
+  const [cards, setCards] = useState<AnnotationCardItem[]>([]);
+  const [edges, setEdges] = useState<CardEdge[]>([]);
 
   const cardsRef = useRef(cards);
   cardsRef.current = cards;
@@ -820,7 +813,7 @@ export default function ReaderView({
     };
   }, [draggingWire, completeDropWireOntoBook]);
 
-  // Load the selected book (or the built-in demo) plus its saved annotations.
+  // Load the selected book plus its saved annotations.
   useEffect(() => {
     let cancelled = false;
 
@@ -831,33 +824,12 @@ export default function ReaderView({
       setPdfSource(null);
     };
 
-    const applyDemo = () => {
-      disposeCurrentBook();
-      setDocFormat('demo');
-      setBookTitle(DEMO_BOOK.title);
-      setParagraphs(SAMPLE_BOOK_PARAGRAPHS);
-      setAnchors(INITIAL_ANCHORS);
-      setCards(INITIAL_CARDS);
-      setEdges(INITIAL_CARD_EDGES);
-      setActiveAnchorId(null);
-      setSelectedCardId(null);
-      setLoadError(null);
-      setToc([]);
-    };
-
     const open = async () => {
       hydratedRef.current = false;
       lastProgressRef.current = null;
       restoreScrollRef.current = parseLocator(book.locator);
       setDocReady(false);
       setShowToc(false);
-
-      if (book.id === DEMO_BOOK.id) {
-        applyDemo();
-        hydratedRef.current = true;
-        setDocReady(true);
-        return;
-      }
 
       try {
         if (book.format === 'pdf') {
@@ -947,9 +919,9 @@ export default function ReaderView({
     };
   }, [docReady, bumpSync]);
 
-  // Persist annotations for real books (debounced so typing stays smooth).
+  // Persist annotations (debounced so typing stays smooth).
   useEffect(() => {
-    if (book.id === DEMO_BOOK.id || !hydratedRef.current) return;
+    if (!hydratedRef.current) return;
     const timer = window.setTimeout(() => {
       void saveAnnotations(book.id, {
         anchors,
@@ -1007,7 +979,6 @@ export default function ReaderView({
 
   const handleScroll = useCallback(() => {
     bumpSync();
-    if (book.id === DEMO_BOOK.id) return;
     const el = unifiedScrollRef.current;
     if (!el) return;
     if (progressTimerRef.current) window.clearTimeout(progressTimerRef.current);
@@ -1028,7 +999,7 @@ export default function ReaderView({
     return () => {
       if (progressTimerRef.current) window.clearTimeout(progressTimerRef.current);
       const last = lastProgressRef.current;
-      if (!last || book.id === DEMO_BOOK.id) return;
+      if (!last) return;
       onProgress(book.id, last.progress, last.locator);
     };
   }, [book.id, onProgress]);

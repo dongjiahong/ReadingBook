@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ReaderView from './ReaderView';
 import { ShelfView } from './components/ShelfView';
 import { SettingsPanel } from './components/SettingsPanel';
-import { DEMO_BOOK } from './data/demoBook';
 import {
   deleteBookRecord,
   listBooks,
@@ -82,10 +81,8 @@ export default function App() {
   const handleOpenBook = useCallback(
     async (book: BookRecord) => {
       setError(null);
-      if (desktop && book.id !== DEMO_BOOK.id) {
-        await markBookOpenedNow(book).catch(() => {});
-      }
-      setActiveBookId(book.id);
+      await markBookOpenedNow(book).catch(() => {});
+    setActiveBookId(book.id);
     },
     [desktop]
   );
@@ -145,9 +142,7 @@ export default function App() {
   const activeBook =
     activeBookId === null
       ? null
-      : activeBookId === DEMO_BOOK.id
-        ? DEMO_BOOK
-        : (books.find((item) => item.id === activeBookId) ?? null);
+      : (books.find((item) => item.id === activeBookId) ?? null);
 
   return (
     <div
@@ -174,7 +169,6 @@ export default function App() {
           error={error}
           onImport={handleImport}
           onOpen={handleOpenBook}
-          onOpenDemo={() => setActiveBookId(DEMO_BOOK.id)}
           onDelete={handleDeleteBook}
           onOpenSettings={() => setShowSettings(true)}
         />

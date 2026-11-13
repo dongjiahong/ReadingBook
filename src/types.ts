@@ -1,4 +1,4 @@
-export type DocFormat = 'demo' | 'epub' | 'pdf';
+export type DocFormat = 'epub' | 'pdf';
 export type AnnotationStyle = 'highlight' | 'underline' | 'pin';
 export type CardKind = 'review' | 'revision' | 'thought';
 

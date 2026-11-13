@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { BookOpen, Loader2, Plus, Settings, Trash2 } from 'lucide-react';
-import { DEMO_BOOK } from '../data/demoBook';
 import { getCoverUrl } from '../services/library';
 import type { BookRecord } from '../types';
 
@@ -11,7 +10,6 @@ interface ShelfViewProps {
   error: string | null;
   onImport: () => void;
   onOpen: (book: BookRecord) => void;
-  onOpenDemo: () => void;
   onDelete: (book: BookRecord) => void;
   onOpenSettings: () => void;
 }
@@ -23,7 +21,6 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
   error,
   onImport,
   onOpen,
-  onOpenDemo,
   onDelete,
   onOpenSettings,
 }) => {
@@ -69,12 +66,6 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
         {error && <div className="shelf__error">{error}</div>}
 
         <div className="shelf__grid">
-          <BookCard
-            book={DEMO_BOOK}
-            demo
-            onOpen={() => onOpenDemo()}
-            onDelete={onDelete}
-          />
           {books.map((book) => (
             <BookCard
               key={book.id}
@@ -108,12 +99,11 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
 
 interface BookCardProps {
   book: BookRecord;
-  demo?: boolean;
   onOpen: () => void;
   onDelete: (book: BookRecord) => void;
 }
 
-const BookCard: React.FC<BookCardProps> = ({ book, demo, onOpen, onDelete }) => {
+const BookCard: React.FC<BookCardProps> = ({ book, onOpen, onDelete }) => {
   const [coverUrl, setCoverUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -147,29 +137,26 @@ const BookCard: React.FC<BookCardProps> = ({ book, demo, onOpen, onDelete }) => 
         }
       }}
     >
-      <div className={`book-card__cover ${demo ? 'book-card__cover--demo' : ''}`}>
+      <div className="book-card__cover">
         {coverUrl ? (
           <img src={coverUrl} alt={`${book.title} 封面`} loading="lazy" />
         ) : (
           <div className="book-card__cover-fallback">
-            <BookOpen size={demo ? 26 : 22} />
-            {demo && <span>示例</span>}
+            <BookOpen size={22} />
           </div>
         )}
-        {!demo && (
-          <button
-            type="button"
-            className="book-card__delete"
-            title="从书架移除"
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete(book);
-            }}
-          >
-            <Trash2 size={13} />
-          </button>
-        )}
-        {book.format === 'pdf' && !demo && <span className="book-card__format">PDF</span>}
+        <button
+          type="button"
+          className="book-card__delete"
+          title="从书架移除"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete(book);
+          }}
+        >
+          <Trash2 size={13} />
+        </button>
+        {book.format === 'pdf' && <span className="book-card__format">PDF</span>}
       </div>
 
       <div className="book-card__info">
@@ -177,13 +164,13 @@ const BookCard: React.FC<BookCardProps> = ({ book, demo, onOpen, onDelete }) => 
           {book.title}
         </div>
         <div className="book-card__author">
-          {demo ? '交互示例文档' : book.author || '未知作者'}
+          {book.author || '未知作者'}
         </div>
         <div className="book-card__progress">
           <span style={{ width: `${Math.min(100, percent)}%` }} />
         </div>
         <div className="book-card__meta">
-          {demo ? '无需导入，直接体验' : percent > 0 ? `已读 ${percent}%` : '尚未开始'}
+          {percent > 0 ? `已读 ${percent}%` : '尚未开始'}
         </div>
       </div>
     </div>
