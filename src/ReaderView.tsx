@@ -44,6 +44,11 @@ import {
 
 const DEFAULT_FREE_CARD_TEXT = '可在右侧无限画布任意摆放，支持粘贴截图或拖入图片。';
 
+// 标注卡片自动排布：一列最多放几张，放不下就向右溢到下一列。
+const COLUMN_STEP_X = 292;
+const MAX_COLUMN_CARDS = 3;
+const MAX_COLUMN_DRIFT = 320;
+
 function parseLocator(locator: string | null): { top: number; left: number } | null {
   if (!locator) return null;
   try {
@@ -1005,6 +1010,32 @@ export default function ReaderView({
     };
   }, [book.id, onProgress]);
 
+  // 在锚点附近找卡片位置：第一列放不下（卡片过多或会被推得太靠下）时，
+  // 依次尝试右侧下一列；连线仍会从书页连过去。
+  const findCardSlot = useCallback(
+    (
+      idealX: number,
+      idealY: number,
+      estHeight: number,
+      list: AnnotationCardItem[]
+    ) => {
+      let fallback = { x: idealX, y: idealY };
+      for (let col = 0; col < 4; col += 1) {
+        const x = idealX + col * COLUMN_STEP_X;
+        const y = findNonOverlappingY(x, idealY, estHeight, list);
+        const countInColumn = list.filter(
+          (card) => Math.abs(card.x - x) < 252
+        ).length;
+        fallback = { x, y };
+        if (countInColumn < MAX_COLUMN_CARDS && y - idealY <= MAX_COLUMN_DRIFT) {
+          return { x, y };
+        }
+      }
+      return fallback;
+    },
+    [findNonOverlappingY]
+  );
+
   const spawnCardForAnchor = useCallback(
     (
       anchorMeta: Omit<BookAnchor, 'id' | 'badgeNumber' | 'kind' | 'targetNodeId'>,
@@ -1027,10 +1058,20 @@ export default function ReaderView({
       const rawY = canvasRect ? anchorScreenY - canvasRect.top - 20 : 100;
       const estLines = Math.max(1, Math.ceil(anchorMeta.quote.length / 18));
       const estHeight = 20 + estLines * 19;
-      // Place the card just right of the visible book edge so a panned canvas
-      // never hides it under the sticky column.
-      const cardX = (unifiedScrollRef.current?.scrollLeft ?? 0) + 44;
-      const candidateY = findNonOverlappingY(cardX, rawY, estHeight, cards);
+      // 以 44 + n*292 为列网格，挑一个当前可见的列作为起始列；
+      // 该列放不下时 findCardSlot 会继续向右尝试。
+      const scrollLeft = unifiedScrollRef.current?.scrollLeft ?? 0;
+      const gridIndex = Math.max(
+        0,
+        Math.ceil((scrollLeft - 44) / COLUMN_STEP_X)
+      );
+      const idealX = 44 + gridIndex * COLUMN_STEP_X;
+      const { x: cardX, y: candidateY } = findCardSlot(
+        idealX,
+        rawY,
+        estHeight,
+        cards
+      );
 
       const newAnchor: BookAnchor = {
         ...anchorMeta,
@@ -1042,7 +1083,7 @@ export default function ReaderView({
 
       const newCard: AnnotationCardItem = {
         id: cardId,
-        x: 44,
+        x: cardX,
         y: candidateY,
         kind,
         badgeNumber,
@@ -1056,7 +1097,7 @@ export default function ReaderView({
       setActiveAnchorId(anchorId);
       setSelectedCardId(cardId);
     },
-    [anchors, cards, bindExistingCardToAnchor, findNonOverlappingY]
+    [anchors, cards, bindExistingCardToAnchor, findCardSlot]
   );
 
   // 基础标注：只在书页上留下高亮/划线，不创建右侧卡片。
