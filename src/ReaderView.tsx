@@ -39,6 +39,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { loadAnnotations, saveAnnotations } from './services/db';
 import { EpubImageLoader, parseEpubFile } from './utils/epubLoader';
 import { computeCardFoldState } from './utils/cardTree';
+import { nearestFreeY, type PlacementBox } from './utils/cardPlacement';
 import {
   createFullImageUrl,
   releaseImage,
@@ -116,6 +117,7 @@ export default function ReaderView({
   cardsRef.current = cards;
   const edgesRef = useRef(edges);
   edgesRef.current = edges;
+  const pendingAutoLayoutRef = useRef(false);
 
   const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
@@ -365,6 +367,8 @@ export default function ReaderView({
 
   const handleToggleCollapseAll = useCallback(() => {
     const collapseAll = cards.some((c) => !c.collapsed);
+    // 折叠/展开会改变卡片高度，排布必须按新高度重算，否则展开后互相压住。
+    pendingAutoLayoutRef.current = true;
     setCards((prev) => prev.map((c) => ({ ...c, collapsed: collapseAll })));
   }, [cards]);
 
@@ -387,7 +391,7 @@ export default function ReaderView({
     }
   }, [revealCardId]);
 
-  // Find a non-overlapping Y coordinate in the target column using actual rendered DOM heights
+  // Find the nearest free Y in the target column using actual rendered DOM heights
   const findNonOverlappingY = useCallback(
     (
       targetX: number,
@@ -395,25 +399,16 @@ export default function ReaderView({
       newCardEstHeight: number,
       list: AnnotationCardItem[]
     ) => {
-      const GAP = 16;
       const canvasEl = canvasRef.current;
-      const sameCol = list
+      const boxes: PlacementBox[] = list
         .filter((c) => Math.abs(c.x - targetX) < 252)
         .map((c) => {
           const el = canvasEl?.querySelector<HTMLElement>(`[data-card-id="${c.id}"]`);
           const h = el ? el.getBoundingClientRect().height : 72;
           return { top: c.y, bottom: c.y + h };
-        })
-        .sort((a, b) => a.top - b.top);
+        });
 
-      let candidateY = Math.max(16, idealY);
-      for (const box of sameCol) {
-        const candidateBottom = candidateY + newCardEstHeight;
-        if (candidateBottom + GAP > box.top && candidateY < box.bottom + GAP) {
-          candidateY = box.bottom + GAP;
-        }
-      }
-      return Math.round(candidateY);
+      return nearestFreeY(idealY, newCardEstHeight, boxes);
     },
     []
   );
@@ -593,15 +588,17 @@ export default function ReaderView({
         return Math.abs(dy) > 1 ? dy : a.y - b.y;
       });
 
-      let prevBottom = 16;
       const targetX = COL_START_X + col * COL_STEP_X;
+      const placedBoxes: PlacementBox[] = [];
 
-      for (const c of colCards) {
+      // 从下往上摆：最下面的卡片停在自己的锚点，上面的卡片依次往上叠，
+      // 冲突时向上让，整列不会像旧实现那样一路往下漂。
+      for (const c of [...colCards].reverse()) {
         const idealY = desiredYMap.get(c.id) ?? c.y;
-        const actualY = Math.max(idealY, prevBottom);
-        newPosMap.set(c.id, { x: targetX, y: Math.round(actualY) });
         const cardH = cardHeightMap.get(c.id) ?? 64;
-        prevBottom = actualY + cardH + ROW_GAP_Y;
+        const actualY = nearestFreeY(idealY, cardH, placedBoxes, ROW_GAP_Y, 16, 'up');
+        newPosMap.set(c.id, { x: targetX, y: actualY });
+        placedBoxes.push({ top: actualY, bottom: actualY + cardH });
       }
     }
 
@@ -612,6 +609,15 @@ export default function ReaderView({
       })
     );
   }, [cards, anchors, edges]);
+
+  // 一键折叠 / 展开之后，等新的卡片高度落到 DOM 上，再整理一次布局，
+  // 省得用户还得手动点一次「自动排列」。
+  useEffect(() => {
+    if (!pendingAutoLayoutRef.current) return;
+    pendingAutoLayoutRef.current = false;
+    const raf = requestAnimationFrame(() => handleAutoLayoutCards());
+    return () => cancelAnimationFrame(raf);
+  }, [cards, handleAutoLayoutCards]);
 
   const handleStartDragToBook = useCallback(
     (cardId: string, clientX: number, clientY: number) => {
