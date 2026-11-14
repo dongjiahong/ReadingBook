@@ -689,39 +689,61 @@ body,
   width: 100%;
 }
 
-.anno-badge {
+/* Collapse toggle: mind-map style folding */
+.anno-collapse-btn {
   width: 16px;
   height: 16px;
   margin-top: 2px;
   flex-shrink: 0;
-  border-radius: 999px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.anno-collapse-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-main);
+}
+
+.anno-collapse-btn.is-collapsed {
+  color: var(--text-main);
+}
+
+.anno-card__preview {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 2px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.anno-card__preview-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.anno-collapse-count {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--hover-bg);
   font-size: 10px;
-  font-weight: 700;
-  color: #ffffff;
-}
-
-.anno-badge--floating {
-  position: absolute;
-  top: 7px;
-  left: 7px;
-  margin-top: 0;
-  z-index: 2;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.28);
-}
-
-.anno-badge--review {
-  background: var(--review-accent);
-}
-
-.anno-badge--revision {
-  background: var(--revision-accent);
-}
-
-.anno-badge--thought {
-  background: var(--thought-accent);
+  font-weight: 600;
+  color: var(--text-muted);
 }
 
 .anno-icon-btn {

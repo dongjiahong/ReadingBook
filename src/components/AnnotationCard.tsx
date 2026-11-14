@@ -1,5 +1,14 @@
 import React, { memo, useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { BookOpen, ImagePlus, Link2, Plus, Trash2, X } from 'lucide-react';
+import {
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  ImagePlus,
+  Link2,
+  Plus,
+  Trash2,
+  X,
+} from 'lucide-react';
 import type { AnnotationCardItem, CardImage } from '../types';
 import { importImageFiles } from '../utils/imageStore';
 
@@ -18,6 +27,9 @@ interface AnnotationCardProps {
   onFocusAnchor: (anchorId: string) => void;
   onStartDragToBook: (cardId: string, clientX: number, clientY: number) => void;
   onStartDragToCard: (cardId: string, clientX: number, clientY: number) => void;
+  onToggleCollapse: (cardId: string) => void;
+  /** 收起后会随之隐藏的后代卡片数量。 */
+  hiddenCount: number;
   onLayoutChange: () => void;
 }
 
@@ -35,9 +47,11 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
   onFocusAnchor,
   onStartDragToBook,
   onStartDragToCard,
+  onToggleCollapse,
+  hiddenCount,
   onLayoutChange,
 }) {
-  const { id, x, y, kind, badgeNumber, body, images = [], anchorId } = card;
+  const { id, x, y, kind, body, images = [], anchorId, collapsed = false } = card;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -52,15 +66,20 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
 
   useLayoutEffect(() => {
     adjustTextareaHeight();
-  }, [body, images.length, adjustTextareaHeight]);
+  }, [body, images.length, collapsed, adjustTextareaHeight]);
 
   // 仅图片卡片在未选中且无文字时收起文字行，选中后重新显示以便输入。
   const hasBody = body.trim().length > 0;
   const showTextRow = hasBody || images.length === 0 || isSelected;
 
+  // 收起时用第一行正文做摘要，保持卡片仍然可读。
+  const firstLine = body.trim().split('\n')[0].trim();
+  const collapsedPreview =
+    firstLine || (images.length > 0 ? `图片 ×${images.length}` : '空卡片');
+
   useLayoutEffect(() => {
     onLayoutChange();
-  }, [isSelected, onLayoutChange]);
+  }, [isSelected, collapsed, onLayoutChange]);
 
   // Drag card to reposition anywhere on the unified right-side infinite canvas
   const handleCardMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -249,11 +268,35 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
 
       {/* Minimalist Content Area */}
       <div className="anno-card__content">
-        {showTextRow ? (
-          <div className="anno-card__text-row">
-            {badgeNumber !== undefined && (
-              <span className={`anno-badge anno-badge--${kind}`}>{badgeNumber}</span>
-            )}
+        <div className="anno-card__text-row">
+          <button
+            type="button"
+            className={`anno-collapse-btn ${collapsed ? 'is-collapsed' : ''}`}
+            title={
+              collapsed
+                ? hiddenCount > 0
+                  ? `展开卡片，同时显示 ${hiddenCount} 张子卡片`
+                  : '展开卡片'
+                : hiddenCount > 0
+                  ? `收起卡片，同时隐藏 ${hiddenCount} 张子卡片`
+                  : '收起卡片'
+            }
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleCollapse(id);
+            }}
+          >
+            {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          </button>
+
+          {collapsed ? (
+            <div className="anno-card__preview" title={firstLine || collapsedPreview}>
+              <span className="anno-card__preview-text">{collapsedPreview}</span>
+              {hiddenCount > 0 && (
+                <span className="anno-collapse-count">+{hiddenCount}</span>
+              )}
+            </div>
+          ) : showTextRow ? (
             <textarea
               ref={textareaRef}
               className="anno-card__textarea"
@@ -263,18 +306,10 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
               onPaste={handlePaste}
               onChange={(e) => onChangeBody(id, e.target.value)}
             />
-          </div>
-        ) : (
-          badgeNumber !== undefined && (
-            <span
-              className={`anno-badge anno-badge--${kind} anno-badge--floating`}
-            >
-              {badgeNumber}
-            </span>
-          )
-        )}
+          ) : null}
+        </div>
 
-        {images.length > 0 && (
+        {!collapsed && images.length > 0 && (
           <div className="anno-card__images">
             {images.map((image, idx) => (
               <div key={image.id} className="anno-card__image-item">

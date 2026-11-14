@@ -43,6 +43,8 @@ export interface AnnotationCardItem {
   images?: CardImage[];
   status?: 'pending' | 'accepted' | 'rejected';
   anchorId?: string;
+  /** 思维导图式折叠：收起自身内容，并隐藏全部后代卡片。 */
+  collapsed?: boolean;
 }
 
 export interface CardEdge {

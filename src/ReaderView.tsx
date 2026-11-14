@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  ChevronsDownUp,
+  ChevronsUpDown,
   GitCommitHorizontal,
   LayoutGrid,
   ListTree,
@@ -36,6 +38,7 @@ import type {
 import { invoke } from '@tauri-apps/api/core';
 import { loadAnnotations, saveAnnotations } from './services/db';
 import { EpubImageLoader, parseEpubFile } from './utils/epubLoader';
+import { computeCardFoldState } from './utils/cardTree';
 import {
   createFullImageUrl,
   releaseImage,
@@ -111,9 +114,12 @@ export default function ReaderView({
 
   const cardsRef = useRef(cards);
   cardsRef.current = cards;
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
 
   const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [revealCardId, setRevealCardId] = useState<string | null>(null);
   const [draggingWire, setDraggingWire] = useState<DraggingWireState | null>(null);
   const [isPanningCanvas, setIsPanningCanvas] = useState(false);
   const [midLineMode, setMidLineMode] = useState<MidLineRoutingMode>('interline');
@@ -169,27 +175,38 @@ export default function ReaderView({
     };
   }, [releaseCardImages]);
 
+  // Mind-map style folding: a collapsed card hides its whole descendant subtree.
+  const { hidden: hiddenCardIds, hiddenCounts: hiddenCountByCard } = useMemo(
+    () => computeCardFoldState(cards, edges),
+    [cards, edges]
+  );
+
+  const visibleCards = useMemo(
+    () => cards.filter((card) => !hiddenCardIds.has(card.id)),
+    [cards, hiddenCardIds]
+  );
+
   // Compute dynamic infinite width for the right canvas based on the rightmost card
   const canvasMinWidth = useMemo(() => {
     let maxRight = 720;
-    for (const c of cards) {
+    for (const c of visibleCards) {
       if (c.x + 360 > maxRight) {
         maxRight = c.x + 360;
       }
     }
     return maxRight + 420;
-  }, [cards]);
+  }, [visibleCards]);
 
   // Compute dynamic minimum height so cards placed lower than short books are still reachable
   const canvasMinHeight = useMemo(() => {
     let maxBottom = 600;
-    for (const c of cards) {
+    for (const c of visibleCards) {
       if (c.y + 260 > maxBottom) {
         maxBottom = c.y + 260;
       }
     }
     return maxBottom;
-  }, [cards]);
+  }, [visibleCards]);
 
   // Compute card-to-card Bézier curves directly in right-canvas local coordinates
   const [cardEdgePaths, setCardEdgePaths] = useState<
@@ -337,6 +354,39 @@ export default function ReaderView({
     setAnchors((prev) => prev.filter((a) => a.targetNodeId !== cardId));
   }, [releaseCardImages]);
 
+  const handleToggleCollapse = useCallback((cardId: string) => {
+    setCards((prev) =>
+      prev.map((c) => (c.id === cardId ? { ...c, collapsed: !c.collapsed } : c))
+    );
+  }, []);
+
+  // 全局一键：还有展开的卡片就全部收起，否则全部展开。
+  const allCardsCollapsed = cards.length > 0 && cards.every((c) => c.collapsed);
+
+  const handleToggleCollapseAll = useCallback(() => {
+    const collapseAll = cards.some((c) => !c.collapsed);
+    setCards((prev) => prev.map((c) => ({ ...c, collapsed: collapseAll })));
+  }, [cards]);
+
+  // 被折叠隐藏的卡片不应该继续保持选中态。
+  useEffect(() => {
+    setSelectedCardId((current) =>
+      current && hiddenCardIds.has(current) ? null : current
+    );
+  }, [hiddenCardIds]);
+
+  // 展开后卡片才重新挂载，滚动定位要等这一次提交完成后再做。
+  useEffect(() => {
+    if (!revealCardId) return;
+    const el = canvasRef.current?.querySelector<HTMLElement>(
+      `[data-card-id="${revealCardId}"]`
+    );
+    setRevealCardId(null);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    }
+  }, [revealCardId]);
+
   // Find a non-overlapping Y coordinate in the target column using actual rendered DOM heights
   const findNonOverlappingY = useCallback(
     (
@@ -376,9 +426,15 @@ export default function ReaderView({
         if (!src) return prev;
         const nextX = src.x + 292;
         const nextY = findNonOverlappingY(nextX, src.y, 56, prev);
+        // 父卡片收起时新子卡片会被一起隐藏，所以先展开父卡片。
+        const base = src.collapsed
+          ? prev.map((c) =>
+              c.id === sourceCardId ? { ...c, collapsed: false } : c
+            )
+          : prev;
 
         return [
-          ...prev,
+          ...base,
           {
             id: childId,
             x: nextX,
@@ -1145,17 +1201,36 @@ export default function ReaderView({
   const handleClickBookAnchor = useCallback((anchor: BookAnchor) => {
     setActiveAnchorId(anchor.id);
     // 基础标注没有关联卡片，点击只高亮书籍原文。
-    if (!anchor.targetNodeId) {
+    const targetId = anchor.targetNodeId;
+    if (!targetId) {
       setSelectedCardId(null);
       return;
     }
-    setSelectedCardId(anchor.targetNodeId);
-    const cardEl = canvasRef.current?.querySelector<HTMLElement>(
-      `[data-card-id="${anchor.targetNodeId}"]`
-    );
-    if (cardEl) {
-      cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    setSelectedCardId(targetId);
+
+    // 目标卡片可能被祖先折叠隐藏：先展开祖先链和它自己，再滚动定位。
+    const parentsByChild = new Map<string, string[]>();
+    for (const edge of edgesRef.current) {
+      const list = parentsByChild.get(edge.target);
+      if (list) list.push(edge.source);
+      else parentsByChild.set(edge.target, [edge.source]);
     }
+    const related = new Set<string>([targetId]);
+    const stack = [...(parentsByChild.get(targetId) ?? [])];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (related.has(id)) continue;
+      related.add(id);
+      stack.push(...(parentsByChild.get(id) ?? []));
+    }
+    setCards((prev) =>
+      prev.some((c) => related.has(c.id) && c.collapsed)
+        ? prev.map((c) =>
+            related.has(c.id) && c.collapsed ? { ...c, collapsed: false } : c
+          )
+        : prev
+    );
+    setRevealCardId(targetId);
   }, []);
 
   const handleCreateFreeCard = () => {
@@ -1331,6 +1406,21 @@ export default function ReaderView({
             <LayoutGrid size={15} />
           </button>
 
+          {cards.length > 0 && (
+            <button
+              type="button"
+              className="topbar__icon-btn"
+              title={allCardsCollapsed ? '展开全部卡片' : '收起全部卡片'}
+              onClick={handleToggleCollapseAll}
+            >
+              {allCardsCollapsed ? (
+                <ChevronsUpDown size={15} />
+              ) : (
+                <ChevronsDownUp size={15} />
+              )}
+            </button>
+          )}
+
           <button
             type="button"
             className="topbar__icon-btn"
@@ -1504,10 +1594,11 @@ export default function ReaderView({
               </svg>
 
               {/* Draggable, Auto-Expanding Minimalist Cards */}
-              {cards.map((card) => (
+              {visibleCards.map((card) => (
                 <AnnotationCard
                   key={card.id}
                   card={card}
+                  hiddenCount={hiddenCountByCard.get(card.id) ?? 0}
                   isSelected={
                     selectedCardId === card.id ||
                     (activeAnchorId !== null && card.anchorId === activeAnchorId)
@@ -1528,6 +1619,7 @@ export default function ReaderView({
                   onFocusAnchor={handleFocusAnchor}
                   onStartDragToBook={handleStartDragToBook}
                   onStartDragToCard={handleStartDragToCard}
+                  onToggleCollapse={handleToggleCollapse}
                   onLayoutChange={recomputeCardEdges}
                 />
               ))}
