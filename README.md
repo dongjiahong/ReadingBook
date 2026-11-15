@@ -81,10 +81,10 @@ npm run dev
 
 ### 应用图标
 
-源图是 `src-tauri/icon.png`（1254×1254）。改动后重新生成全套图标：
+源图是仓库根目录的 `readingbook.png`（1024×1024，透明背景）。改动后重新生成全套图标：
 
 ```sh
-npx tauri icon src-tauri/icon.png
+npx tauri icon readingbook.png
 ```
 
 ## 目录结构
@@ -109,7 +109,7 @@ src-tauri/
   src/lib.rs                 SQLite 迁移与按需读取命令（book_file_size / read_book_range）
   migrations/0001_init.sql   books / book_annotations / settings 三张表
   tauri.conf.json            窗口、bundle、asset 协议配置
-  icons/                     打包用图标（由 icon.png 生成）
+  icons/                     打包用图标（由 readingbook.png 生成）
 docs/                         截图（书架 / 阅读工作区 / EPUB）
 ARCHITECTURE.md              需求演进、架构选型、算法与内存实测
 ```
