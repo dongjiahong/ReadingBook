@@ -546,6 +546,39 @@ body,
   margin: 0 2px;
 }
 
+/* Floating Actions for Plain Annotations (highlight / underline only) */
+.anchor-actions-popover {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  display: flex;
+  align-items: center;
+  background: #18181b;
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.22);
+  z-index: 60;
+}
+
+.anchor-actions-popover__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: #fca5a5;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.anchor-actions-popover__btn:hover {
+  background: rgba(239, 68, 68, 0.18);
+}
+
 /* Resizer Divider on right edge of sticky book column */
 .pane-resizer {
   position: absolute;

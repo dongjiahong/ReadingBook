@@ -84,7 +84,7 @@ interface PdfBookPaneProps {
     withCard?: boolean;
     linkToExistingNodeId?: string;
   }) => void;
-  onClickAnchor: (anchor: BookAnchor) => void;
+  onClickAnchor: (anchor: BookAnchor, point?: { x: number; y: number }) => void;
   onPreviewImage: (blob: Blob, alt: string) => void;
   onOutline?: (entries: TocEntry[]) => void;
 }
@@ -485,7 +485,7 @@ interface PdfPageViewProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   anchors: BookAnchor[];
   activeAnchorId: string | null;
-  onClickAnchor: (anchor: BookAnchor) => void;
+  onClickAnchor: (anchor: BookAnchor, point?: { x: number; y: number }) => void;
   onPreviewImage: (blob: Blob, alt: string) => void;
   onPageRendered: () => void;
   onStartBoxSelect: (pageEl: HTMLElement, clientX: number, clientY: number) => void;
@@ -714,8 +714,16 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
               key={`${anchor.id}-${idx}`}
               data-anchor-id={isFirstRect ? anchor.id : undefined}
               data-anchor-group={anchor.id}
-              onClick={() => onClickAnchor(anchor)}
-              title={anchor.quote || '点击聚焦右侧关联批注卡片'}
+              onClick={(e) =>
+                onClickAnchor(anchor, { x: e.clientX, y: e.clientY })
+              }
+              title={
+                anchor.quote
+                  ? anchor.targetNodeId
+                    ? '点击聚焦右侧关联批注卡片'
+                    : '点击管理该标注'
+                  : '点击聚焦右侧关联批注卡片'
+              }
               style={{
                 position: 'absolute',
                 left: `${r.x * 100}%`,

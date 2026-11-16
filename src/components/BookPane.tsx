@@ -34,7 +34,7 @@ interface BookPaneProps {
     withCard?: boolean;
     linkToExistingNodeId?: string;
   }) => void;
-  onClickAnchor: (anchor: BookAnchor) => void;
+  onClickAnchor: (anchor: BookAnchor, point?: { x: number; y: number }) => void;
 }
 
 export const BookPane: React.FC<BookPaneProps> = ({
@@ -215,9 +215,13 @@ export const BookPane: React.FC<BookPaneProps> = ({
               .join(' ')}
             onClick={(e) => {
               e.stopPropagation();
-              onClickAnchor(anchor);
+              onClickAnchor(anchor, { x: e.clientX, y: e.clientY });
             }}
-            title="点击聚焦右侧关联批注卡片"
+            title={
+              anchor.targetNodeId
+                ? '点击聚焦右侧关联批注卡片'
+                : '点击管理该标注'
+            }
           >
             {renderFormattedSlice(paragraph, start, end, `a-${anchor.id}`)}
           </span>

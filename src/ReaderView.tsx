@@ -10,6 +10,7 @@ import {
   PlusCircle,
   RotateCcw,
   Settings,
+  Trash2,
   X,
   ZoomIn,
   ZoomOut,
@@ -120,6 +121,12 @@ export default function ReaderView({
   const pendingAutoLayoutRef = useRef(false);
 
   const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
+  // 基础标注（仅划线/高亮）被点击后弹出的删除操作条，坐标相对视口。
+  const [anchorActions, setAnchorActions] = useState<{
+    anchorId: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [revealCardId, setRevealCardId] = useState<string | null>(null);
   const [draggingWire, setDraggingWire] = useState<DraggingWireState | null>(null);
@@ -355,6 +362,32 @@ export default function ReaderView({
     setEdges((prev) => prev.filter((e) => e.source !== cardId && e.target !== cardId));
     setAnchors((prev) => prev.filter((a) => a.targetNodeId !== cardId));
   }, [releaseCardImages]);
+
+  const handleDeleteAnchor = useCallback((anchorId: string) => {
+    setAnchors((prev) => prev.filter((a) => a.id !== anchorId));
+    setActiveAnchorId((current) => (current === anchorId ? null : current));
+    setAnchorActions(null);
+  }, []);
+
+  // 点击操作条和标注以外的地方、或按 Esc 时收起删除操作条。
+  useEffect(() => {
+    if (!anchorActions) return;
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('.anchor-actions-popover')) return;
+      if (target.closest('[data-anchor-id]')) return;
+      setAnchorActions(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAnchorActions(null);
+    };
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [anchorActions]);
 
   const handleToggleCollapse = useCallback((cardId: string) => {
     setCards((prev) =>
@@ -1041,6 +1074,8 @@ export default function ReaderView({
   }, [settings.bookWidth]);
 
   const handleScroll = useCallback(() => {
+    // 滚动后操作条会错位，直接收起。
+    setAnchorActions((prev) => (prev ? null : prev));
     bumpSync();
     const el = unifiedScrollRef.current;
     if (!el) return;
@@ -1204,14 +1239,18 @@ export default function ReaderView({
     [spawnCardForAnchor, createPlainAnchor]
   );
 
-  const handleClickBookAnchor = useCallback((anchor: BookAnchor) => {
+  const handleClickBookAnchor = useCallback((anchor: BookAnchor, point?: { x: number; y: number }) => {
     setActiveAnchorId(anchor.id);
-    // 基础标注没有关联卡片，点击只高亮书籍原文。
+    // 基础标注没有关联卡片，点击后弹出删除入口。
     const targetId = anchor.targetNodeId;
     if (!targetId) {
       setSelectedCardId(null);
+      if (point) {
+        setAnchorActions({ anchorId: anchor.id, x: point.x, y: point.y });
+      }
       return;
     }
+    setAnchorActions(null);
     setSelectedCardId(targetId);
 
     // 目标卡片可能被祖先折叠隐藏：先展开祖先链和它自己，再滚动定位。
@@ -1644,6 +1683,39 @@ export default function ReaderView({
           bridgeTriggerRef={bridgeTriggerRef}
         />
       </div>
+
+      {/* 基础标注（仅高亮/划线）的删除操作条 */}
+      {anchorActions &&
+        (() => {
+          const anchor = anchors.find((a) => a.id === anchorActions.anchorId);
+          if (!anchor) return null;
+          const halfWidth = 64;
+          const left = Math.min(
+            Math.max(anchorActions.x, halfWidth + 8),
+            window.innerWidth - halfWidth - 8
+          );
+          const label = anchor.style === 'highlight' ? '删除高亮' : '删除划线';
+          return (
+            <div
+              className="anchor-actions-popover"
+              style={{
+                left: `${left}px`,
+                top: `${Math.max(56, anchorActions.y - 10)}px`,
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="anchor-actions-popover__btn"
+                title={`${label}（不删除书籍原文）`}
+                onClick={() => handleDeleteAnchor(anchor.id)}
+              >
+                <Trash2 size={12} />
+                <span>{label}</span>
+              </button>
+            </div>
+          );
+        })()}
 
       {/* Fullscreen Image Lightbox Modal (click backdrop or press Esc to close) */}
       {previewImage && (
