@@ -1365,7 +1365,7 @@ export default function ReaderView({
   return (
     <div className="app-shell">
       <header className="topbar" data-tauri-drag-region>
-        <div className="topbar__left">
+        <div className="topbar__left" data-tauri-drag-region>
           <button
             type="button"
             className="topbar__icon-btn"
@@ -1384,7 +1384,7 @@ export default function ReaderView({
               <ListTree size={15} />
             </button>
           )}
-          <div className="topbar__doc">
+          <div className="topbar__doc" data-tauri-drag-region>
             <span className="topbar__title" data-tauri-drag-region>
               {bookTitle}
             </span>
