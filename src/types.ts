@@ -1,5 +1,6 @@
 export type DocFormat = 'epub' | 'pdf';
 export type AnnotationStyle = 'highlight' | 'underline' | 'pin';
+export type AnchorColor = 'amber' | 'green' | 'blue' | 'rose';
 export type CardKind = 'review' | 'revision' | 'thought';
 
 export interface NormalizedPdfRect {
@@ -20,6 +21,7 @@ export interface BookAnchor {
   startOffset: number;
   endOffset: number;
   style: AnnotationStyle;
+  color?: AnchorColor;
   badgeNumber: number;
   kind: CardKind;
   /** 关联的批注卡片；基础标注（仅高亮/划线）没有卡片。 */

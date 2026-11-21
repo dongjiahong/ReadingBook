@@ -141,7 +141,12 @@ export const BookToCanvasBridge: React.FC<BookToCanvasBridgeProps> = React.memo(
           );
           const primaryEl =
             groupEls[0] ??
-            bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchor.id}"]`);
+            bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchor.id}"]`) ??
+            (anchor.style === 'pin'
+              ? bookEl.querySelector<HTMLElement>(
+                  `[data-paragraph-id="${anchor.paragraphId}"]`
+                )
+              : null);
 
           const handleEl = outerEl.querySelector<HTMLElement>(
             `[data-card-handle-id="${anchor.targetNodeId}"]`
@@ -306,11 +311,19 @@ export const BookToCanvasBridge: React.FC<BookToCanvasBridgeProps> = React.memo(
       <svg ref={svgRef} className="bridge-svg-layer" aria-hidden="true">
         {anchors.map((anchor) => {
           const color =
-            anchor.kind === 'review'
+            anchor.color === 'amber'
               ? '#c99b26'
-              : anchor.kind === 'revision'
+              : anchor.color === 'green'
                 ? '#1a8f5c'
-                : '#2563eb';
+                : anchor.color === 'rose'
+                  ? '#e11d48'
+                  : anchor.color === 'blue'
+                    ? '#2563eb'
+                    : anchor.kind === 'review'
+                      ? '#c99b26'
+                      : anchor.kind === 'revision'
+                        ? '#1a8f5c'
+                        : '#2563eb';
           return (
             <g key={anchor.id} data-bridge-id={anchor.id} style={{ display: 'none' }}>
               <path fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" />

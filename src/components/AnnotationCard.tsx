@@ -16,6 +16,8 @@ import { importImageFiles } from '../utils/imageStore';
 interface AnnotationCardProps {
   card: AnnotationCardItem;
   cardScale?: number;
+  autoFocus?: boolean;
+  onAutoFocused?: () => void;
   isSelected: boolean;
   onSelect: (cardId: string) => void;
   onMoveCard: (cardId: string, nextX: number, nextY: number) => void;
@@ -39,6 +41,8 @@ interface AnnotationCardProps {
 export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function AnnotationCard({
   card,
   cardScale = 1,
+  autoFocus = false,
+  onAutoFocused,
   isSelected,
   onSelect,
   onMoveCard,
@@ -85,6 +89,13 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
   useLayoutEffect(() => {
     onLayoutChange();
   }, [isSelected, collapsed, onLayoutChange]);
+
+  useLayoutEffect(() => {
+    if (autoFocus && !collapsed && textareaRef.current) {
+      textareaRef.current.focus();
+      onAutoFocused?.();
+    }
+  }, [autoFocus, collapsed, onAutoFocused]);
 
   // Drag card to reposition anywhere on the unified right-side infinite canvas
   const handleCardMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {

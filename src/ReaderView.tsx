@@ -3,17 +3,21 @@ import {
   ArrowLeft,
   ChevronsDownUp,
   ChevronsUpDown,
+  Copy,
   Download,
   GitCommitHorizontal,
+  Highlighter,
   LayoutGrid,
   ListTree,
   Loader2,
+  MessageSquarePlus,
   PlusCircle,
   Redo2,
   RotateCcw,
   Search,
   Settings,
   Trash2,
+  Underline,
   Undo2,
   X,
   ZoomIn,
@@ -21,6 +25,7 @@ import {
 } from 'lucide-react';
 import { AnnotationCard } from './components/AnnotationCard';
 import { BookPane } from './components/BookPane';
+import { ANCHOR_COLORS } from './components/SelectionPopover';
 import { ImageAnnotatorModal } from './components/ImageAnnotatorModal';
 import { SearchModal, type SearchResultAction } from './components/SearchModal';
 import {
@@ -29,6 +34,7 @@ import {
 } from './components/BookToCanvasBridge';
 import { PdfBookPane, type PdfSource } from './components/PdfBookPane';
 import type {
+  AnchorColor,
   AnnotationCardItem,
   AnnotationStyle,
   BookAnchor,
@@ -86,6 +92,15 @@ function parseLocator(locator: string | null): SavedLocator | null {
   } catch {
     return null;
   }
+}
+
+function findAnchorElement(bookEl: HTMLElement, anchor: BookAnchor): HTMLElement | null {
+  return (
+    bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchor.id}"]`) ??
+    (anchor.style === 'pin'
+      ? bookEl.querySelector<HTMLElement>(`[data-paragraph-id="${anchor.paragraphId}"]`)
+      : null)
+  );
 }
 
 interface PreviewImageState {
@@ -192,6 +207,7 @@ export default function ReaderView({
     y: number;
   } | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [autoFocusCardId, setAutoFocusCardId] = useState<string | null>(null);
   const [revealCardId, setRevealCardId] = useState<string | null>(null);
   const [draggingWire, setDraggingWire] = useState<DraggingWireState | null>(null);
   const [isPanningCanvas, setIsPanningCanvas] = useState(false);
@@ -508,7 +524,10 @@ export default function ReaderView({
     const canvasEl = canvasRef.current;
     const bookEl = bookStickyRef.current;
     if (!canvasEl || !bookEl) return null;
-    const anchorEl = bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchorId}"]`);
+    const found = latestAnnotationsRef.current.anchors.find((a) => a.id === anchorId);
+    const anchorEl = found
+      ? findAnchorElement(bookEl, found)
+      : bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchorId}"]`);
     if (!anchorEl) return null;
     const rect = anchorEl.getBoundingClientRect();
     if (rect.height <= 0) return null;
@@ -550,6 +569,41 @@ export default function ReaderView({
       )
     );
   }, []);
+
+  // 选中卡片时直接 ⌘/Ctrl+V 粘贴剪贴板截图，无需先点进卡片输入框
+  useEffect(() => {
+    if (!selectedCardId) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'TEXTAREA' ||
+          target.tagName === 'INPUT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imageFiles: File[] = [];
+      for (let i = 0; i < items.length; i += 1) {
+        if (items[i].type.startsWith('image/')) {
+          const file = items[i].getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (imageFiles.length === 0) return;
+      e.preventDefault();
+      const targetCardId = selectedCardId;
+      void importImageFiles(imageFiles).then((imported) => {
+        if (imported.length > 0) {
+          handleAddImages(targetCardId, imported);
+        }
+      });
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [selectedCardId, handleAddImages]);
 
   const handleRemoveImage = useCallback(
     (cardId: string, image: CardImage) => {
@@ -614,7 +668,10 @@ export default function ReaderView({
     setActiveAnchorId(anchorId);
     const bookEl = bookStickyRef.current;
     if (!bookEl) return;
-    const targetEl = bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchorId}"]`);
+    const found = latestAnnotationsRef.current.anchors.find((a) => a.id === anchorId);
+    const targetEl = found
+      ? findAnchorElement(bookEl, found)
+      : bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchorId}"]`);
     if (targetEl) {
       targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
@@ -640,6 +697,29 @@ export default function ReaderView({
     setActiveAnchorId((current) => (current === anchorId ? null : current));
     setAnchorActions(null);
   }, [pushUndoSnapshot]);
+
+  const handleUpdateAnchor = useCallback(
+    (anchorId: string, patch: Partial<Pick<BookAnchor, 'color' | 'style'>>) => {
+      pushUndoSnapshot();
+      setAnchors((prev) =>
+        prev.map((a) => {
+          if (a.id !== anchorId) return a;
+          const nextStyle = patch.style ?? a.style;
+          return {
+            ...a,
+            ...patch,
+            kind:
+              nextStyle === 'highlight'
+                ? 'review'
+                : nextStyle === 'underline'
+                  ? 'revision'
+                  : a.kind,
+          };
+        })
+      );
+    },
+    [pushUndoSnapshot]
+  );
 
   // 点击操作条和标注以外的地方、或按 Esc 时收起删除操作条。
   useEffect(() => {
@@ -782,9 +862,7 @@ export default function ReaderView({
     const anchorTargetYMap = new Map<string, number>();
     for (const anchor of anchors) {
       if (!anchor.targetNodeId || !layoutCardIds.has(anchor.targetNodeId)) continue;
-      const anchorEl = bookEl.querySelector<HTMLElement>(
-        `[data-anchor-id="${anchor.id}"]`
-      );
+      const anchorEl = findAnchorElement(bookEl, anchor);
       if (anchorEl) {
         const rect = anchorEl.getBoundingClientRect();
         if (rect.height > 0) {
@@ -1033,13 +1111,11 @@ export default function ReaderView({
       setCards((prev) =>
         prev.map((c) => {
           if (c.id !== cardId) return c;
-          const shouldFillQuote =
-            !c.body.trim() || c.body.trim() === DEFAULT_FREE_CARD_TEXT;
           return {
             ...c,
             badgeNumber,
             anchorId,
-            body: shouldFillQuote && anchorMeta.quote ? anchorMeta.quote : c.body,
+            body: c.body.trim() === DEFAULT_FREE_CARD_TEXT ? '' : c.body,
           };
         })
       );
@@ -1354,9 +1430,7 @@ export default function ReaderView({
       if (!anchor.targetNodeId) continue;
       const card = visibleCards.find((c) => c.id === anchor.targetNodeId);
       if (!card) continue;
-      const anchorEl = bookEl.querySelector<HTMLElement>(
-        `[data-anchor-id="${anchor.id}"]`
-      );
+      const anchorEl = findAnchorElement(bookEl, anchor);
       if (!anchorEl) continue;
       const rect = anchorEl.getBoundingClientRect();
       if (rect.height <= 0) continue;
@@ -1809,10 +1883,12 @@ export default function ReaderView({
       linkToExistingNodeId?: string
     ) => {
       if (linkToExistingNodeId) {
+        pushUndoSnapshot();
         bindExistingCardToAnchor(linkToExistingNodeId, anchorMeta);
         return;
       }
 
+      pushUndoSnapshot();
       const kind = anchorMeta.style === 'highlight' ? 'review' : 'revision';
       const sameKindCount = anchors.filter((a) => a.kind === kind).length;
       const badgeNumber = sameKindCount + 1;
@@ -1821,9 +1897,8 @@ export default function ReaderView({
 
       // Convert screen Y directly into unified canvas Y (same native scroll coordinate!)
       const canvasRect = canvasRef.current?.getBoundingClientRect();
-      const rawY = canvasRect ? anchorScreenY - canvasRect.top - 20 : 100;
-      const estLines = Math.max(1, Math.ceil(anchorMeta.quote.length / 18));
-      const estHeight = 20 + estLines * 19;
+      const rawY = canvasRect ? Math.max(20, anchorScreenY - canvasRect.top - 20) : 100;
+      const estHeight = 64;
       // Place the card just right of the visible book edge so a panned canvas
       // never hides it under the sticky column.
       const cardX = (unifiedScrollRef.current?.scrollLeft ?? 0) + 44;
@@ -1843,17 +1918,67 @@ export default function ReaderView({
         y: candidateY,
         kind,
         badgeNumber,
-        body: anchorMeta.quote,
+        body: '',
         status: kind === 'revision' ? 'pending' : undefined,
         anchorId,
+        anchorOffsetY: Math.round(candidateY - rawY),
       };
 
       setAnchors((prev) => [...prev, newAnchor]);
       setCards((prev) => [...prev, newCard]);
       setActiveAnchorId(anchorId);
       setSelectedCardId(cardId);
+      setAutoFocusCardId(cardId);
     },
-    [anchors, cards, bindExistingCardToAnchor, findNonOverlappingY]
+    [anchors, cards, bindExistingCardToAnchor, findNonOverlappingY, pushUndoSnapshot]
+  );
+
+  // 将已有的纯高亮/纯划线标注一键升级为带连线的空白批注卡
+  const handlePromoteAnchorToCard = useCallback(
+    (anchor: BookAnchor) => {
+      pushUndoSnapshot();
+      const kind = anchor.style === 'highlight' ? 'review' : 'revision';
+      const sameKindCount = anchors.filter((a) => a.kind === kind && a.targetNodeId).length;
+      const badgeNumber = sameKindCount + 1;
+      const cardId = `card-${Date.now()}`;
+
+      const bookEl = bookStickyRef.current;
+      const canvasRect = canvasRef.current?.getBoundingClientRect();
+      const anchorEl = bookEl ? findAnchorElement(bookEl, anchor) : null;
+      const anchorRect = anchorEl?.getBoundingClientRect();
+      const anchorScreenY = anchorRect
+        ? anchorRect.top + anchorRect.height / 2
+        : anchorActions?.y ?? 200;
+      const rawY = canvasRect ? Math.max(20, anchorScreenY - canvasRect.top - 20) : 100;
+      const cardX = (unifiedScrollRef.current?.scrollLeft ?? 0) + 44;
+      const candidateY = findNonOverlappingY(cardX, rawY, 64, cards);
+
+      const newCard: AnnotationCardItem = {
+        id: cardId,
+        x: cardX,
+        y: candidateY,
+        kind,
+        badgeNumber,
+        body: '',
+        status: kind === 'revision' ? 'pending' : undefined,
+        anchorId: anchor.id,
+        anchorOffsetY: Math.round(candidateY - rawY),
+      };
+
+      setAnchors((prev) =>
+        prev.map((a) =>
+          a.id === anchor.id
+            ? { ...a, targetNodeId: cardId, badgeNumber, kind }
+            : a
+        )
+      );
+      setCards((prev) => [...prev, newCard]);
+      setAnchorActions(null);
+      setActiveAnchorId(anchor.id);
+      setSelectedCardId(cardId);
+      setAutoFocusCardId(cardId);
+    },
+    [anchors, cards, anchorActions, findNonOverlappingY, pushUndoSnapshot]
   );
 
   // 基础标注：只在书页上留下高亮/划线，不创建右侧卡片。
@@ -1861,6 +1986,7 @@ export default function ReaderView({
     (
       anchorMeta: Omit<BookAnchor, 'id' | 'badgeNumber' | 'kind' | 'targetNodeId'>
     ) => {
+      pushUndoSnapshot();
       const newAnchor: BookAnchor = {
         ...anchorMeta,
         id: `anchor-${Date.now()}`,
@@ -1870,7 +1996,7 @@ export default function ReaderView({
       setAnchors((prev) => [...prev, newAnchor]);
       setActiveAnchorId(newAnchor.id);
     },
-    []
+    [pushUndoSnapshot]
   );
 
   const handleCreateTextAnnotation = useCallback(
@@ -1880,6 +2006,7 @@ export default function ReaderView({
       startOffset: number;
       endOffset: number;
       style: AnnotationStyle;
+      color?: AnchorColor;
       anchorScreenY: number;
       /** false 时只做基础标注，不生成卡片。 */
       withCard?: boolean;
@@ -1897,6 +2024,7 @@ export default function ReaderView({
         startOffset: draft.startOffset,
         endOffset: draft.endOffset,
         style: draft.style,
+        color: draft.color,
       };
 
       if (draft.withCard === false) {
@@ -1914,6 +2042,7 @@ export default function ReaderView({
       quote: string;
       rects: NormalizedPdfRect[];
       style: AnnotationStyle;
+      color?: AnchorColor;
       anchorScreenY: number;
       /** false 时只做基础标注，不生成卡片。 */
       withCard?: boolean;
@@ -1928,6 +2057,7 @@ export default function ReaderView({
         startOffset: 0,
         endOffset: draft.quote.length,
         style: draft.style,
+        color: draft.color,
       };
 
       if (draft.withCard === false) {
@@ -1937,6 +2067,66 @@ export default function ReaderView({
       spawnCardForAnchor(anchorMeta, draft.anchorScreenY, draft.linkToExistingNodeId);
     },
     [spawnCardForAnchor, createPlainAnchor]
+  );
+
+  // 将书页中的 EPUB 插图一键转为右侧带图批注卡片并连线到该图
+  const handleCreateImageCard = useCallback(
+    async (paragraphId: string, blob: Blob, alt: string, anchorScreenY: number) => {
+      const ext = blob.type.includes('png')
+        ? 'png'
+        : blob.type.includes('webp')
+          ? 'webp'
+          : 'jpg';
+      const file = new File([blob], `epub-figure-${Date.now()}.${ext}`, {
+        type: blob.type || 'image/png',
+      });
+      const imported = await importImageFiles([file]);
+      if (imported.length === 0) return;
+
+      pushUndoSnapshot();
+      const anchorId = `anchor-${Date.now()}`;
+      const cardId = `card-${Date.now()}`;
+      const badgeNumber =
+        latestAnnotationsRef.current.anchors.filter((a) => a.kind === 'thought').length + 1;
+
+      const canvasRect = canvasRef.current?.getBoundingClientRect();
+      const rawY = canvasRect ? Math.max(20, anchorScreenY - canvasRect.top - 20) : 100;
+      const cardX = (unifiedScrollRef.current?.scrollLeft ?? 0) + 44;
+      const candidateY = findNonOverlappingY(cardX, rawY, 180, cardsRef.current);
+
+      const newAnchor: BookAnchor = {
+        id: anchorId,
+        docFormat: 'epub',
+        paragraphId,
+        quote: alt || '插图批注',
+        startOffset: 0,
+        endOffset: 0,
+        style: 'pin',
+        color: 'blue',
+        badgeNumber,
+        kind: 'thought',
+        targetNodeId: cardId,
+      };
+
+      const newCard: AnnotationCardItem = {
+        id: cardId,
+        x: cardX,
+        y: candidateY,
+        kind: 'thought',
+        badgeNumber,
+        body: '',
+        images: imported,
+        anchorId,
+        anchorOffsetY: Math.round(candidateY - rawY),
+      };
+
+      setAnchors((prev) => [...prev, newAnchor]);
+      setCards((prev) => [...prev, newCard]);
+      setActiveAnchorId(anchorId);
+      setSelectedCardId(cardId);
+      setAutoFocusCardId(cardId);
+    },
+    [findNonOverlappingY, pushUndoSnapshot]
   );
 
   const handleClickBookAnchor = useCallback((anchor: BookAnchor, point?: { x: number; y: number }) => {
@@ -2371,6 +2561,7 @@ export default function ReaderView({
                   scrollContainerRef={unifiedScrollRef}
                   epubImageLoader={epubImageLoader}
                   onImageLoaded={handleEpubImageLoaded}
+                  onCreateImageCard={handleCreateImageCard}
                   onScroll={handleScroll}
                   onCreateAnnotation={handleCreateTextAnnotation}
                   onClickAnchor={handleClickBookAnchor}
@@ -2438,6 +2629,8 @@ export default function ReaderView({
                     selectedCardId === card.id ||
                     (activeAnchorId !== null && card.anchorId === activeAnchorId)
                   }
+                  autoFocus={autoFocusCardId === card.id}
+                  onAutoFocused={() => setAutoFocusCardId(null)}
                   onSelect={(id) => {
                     setSelectedCardId(id);
                     const found = cards.find((c) => c.id === id);
@@ -2475,17 +2668,20 @@ export default function ReaderView({
         />
       </div>
 
-      {/* 基础标注（仅高亮/划线）的删除操作条 */}
+      {/* 基础标注（仅高亮/划线）的快捷管理条：换色 / 切换样式 / 升级为批注卡 / 复制 / 删除 */}
       {anchorActions &&
         (() => {
           const anchor = anchors.find((a) => a.id === anchorActions.anchorId);
           if (!anchor) return null;
-          const halfWidth = 64;
+          const halfWidth = 152;
           const left = Math.min(
             Math.max(anchorActions.x, halfWidth + 8),
             window.innerWidth - halfWidth - 8
           );
-          const label = anchor.style === 'highlight' ? '删除高亮' : '删除划线';
+          const curColor: AnchorColor =
+            anchor.color ?? (anchor.style === 'underline' ? 'green' : 'amber');
+          const nextStyle: AnnotationStyle =
+            anchor.style === 'highlight' ? 'underline' : 'highlight';
           return (
             <div
               className="anchor-actions-popover"
@@ -2495,14 +2691,61 @@ export default function ReaderView({
               }}
               onMouseDown={(e) => e.stopPropagation()}
             >
+              <div className="selection-popover__swatches">
+                {ANCHOR_COLORS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`selection-popover__swatch ${
+                      curColor === item.id ? 'is-active' : ''
+                    }`}
+                    style={{ background: item.swatch }}
+                    title={`改为${item.label}`}
+                    onClick={() => handleUpdateAnchor(anchor.id, { color: item.id })}
+                  />
+                ))}
+              </div>
+              <div className="selection-popover__sep" />
+              <button
+                type="button"
+                className="selection-popover__icon-btn"
+                title={nextStyle === 'underline' ? '改为下划线' : '改为高亮'}
+                onClick={() => handleUpdateAnchor(anchor.id, { style: nextStyle })}
+              >
+                {nextStyle === 'underline' ? (
+                  <Underline size={13} />
+                ) : (
+                  <Highlighter size={13} />
+                )}
+              </button>
+              <button
+                type="button"
+                className="selection-popover__btn selection-popover__btn--primary"
+                title="为该标注生成空白批注卡并连线"
+                onClick={() => handlePromoteAnchorToCard(anchor)}
+              >
+                <MessageSquarePlus size={12} />
+                <span>建卡</span>
+              </button>
+              <button
+                type="button"
+                className="selection-popover__icon-btn"
+                title="复制标注原文"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(anchor.quote).catch(() => {});
+                  setAnchorActions(null);
+                }}
+              >
+                <Copy size={12} />
+              </button>
+              <div className="selection-popover__sep" />
               <button
                 type="button"
                 className="anchor-actions-popover__btn"
-                title={`${label}（不删除书籍原文）`}
+                title="删除标注（不删除书籍原文）"
                 onClick={() => handleDeleteAnchor(anchor.id)}
               >
                 <Trash2 size={12} />
-                <span>{label}</span>
               </button>
             </div>
           );

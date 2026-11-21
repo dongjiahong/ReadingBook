@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Highlighter, Link2, Underline } from 'lucide-react';
-import type { AnnotationStyle, BookAnchor, BookParagraph } from '../types';
+import { MessageSquarePlus } from 'lucide-react';
+import type { AnchorColor, AnnotationStyle, BookAnchor, BookParagraph } from '../types';
 import type { EpubImageLoader } from '../utils/epubLoader';
+import { SelectionPopover } from './SelectionPopover';
 
 interface SelectionDraft {
   paragraphId: string;
@@ -23,6 +24,12 @@ interface BookPaneProps {
   epubImageLoader?: EpubImageLoader | null;
   onPreviewImage?: (blob: Blob, alt: string) => void;
   onImageLoaded?: (imagePath?: string, width?: number, height?: number) => void;
+  onCreateImageCard?: (
+    paragraphId: string,
+    blob: Blob,
+    alt: string,
+    anchorScreenY: number
+  ) => void;
   onScroll: () => void;
   onCreateAnnotation: (draft: {
     paragraphId: string;
@@ -30,6 +37,7 @@ interface BookPaneProps {
     startOffset: number;
     endOffset: number;
     style: AnnotationStyle;
+    color?: AnchorColor;
     anchorScreenY: number;
     /** false 时只做基础标注，不创建卡片。 */
     withCard?: boolean;
@@ -48,6 +56,7 @@ export const BookPane: React.FC<BookPaneProps> = ({
   epubImageLoader,
   onPreviewImage,
   onImageLoaded,
+  onCreateImageCard,
   onScroll,
   onCreateAnnotation,
   onClickAnchor,
@@ -127,25 +136,35 @@ export const BookPane: React.FC<BookPaneProps> = ({
     });
   }, []);
 
-  const handleChooseStyle = (
-    style: AnnotationStyle,
-    linkToExistingNodeId?: string,
-    withCard = true
-  ) => {
-    if (!selectionDraft) return;
-    onCreateAnnotation({
-      paragraphId: selectionDraft.paragraphId,
-      quote: selectionDraft.quote,
-      startOffset: selectionDraft.startOffset,
-      endOffset: selectionDraft.endOffset,
-      style,
-      anchorScreenY: selectionDraft.anchorScreenY,
-      withCard,
-      linkToExistingNodeId,
-    });
+  const handleAnnotateFromPopover = useCallback(
+    (options: {
+      style: AnnotationStyle;
+      color: AnchorColor;
+      withCard: boolean;
+      linkToExistingNodeId?: string;
+    }) => {
+      if (!selectionDraft) return;
+      onCreateAnnotation({
+        paragraphId: selectionDraft.paragraphId,
+        quote: selectionDraft.quote,
+        startOffset: selectionDraft.startOffset,
+        endOffset: selectionDraft.endOffset,
+        style: options.style,
+        color: options.color,
+        anchorScreenY: selectionDraft.anchorScreenY,
+        withCard: options.withCard,
+        linkToExistingNodeId: options.linkToExistingNodeId,
+      });
+      window.getSelection()?.removeAllRanges();
+      setSelectionDraft(null);
+    },
+    [selectionDraft, onCreateAnnotation]
+  );
+
+  const handleDismissPopover = useCallback(() => {
     window.getSelection()?.removeAllRanges();
     setSelectionDraft(null);
-  };
+  }, []);
 
   // Splits a text range into styled fragments using the paragraph's inline runs.
   const renderFormattedSlice = (
@@ -234,6 +253,7 @@ export const BookPane: React.FC<BookPaneProps> = ({
               anchor.style === 'highlight'
                 ? 'book-anchor--highlight'
                 : 'book-anchor--underline',
+              anchor.color ? `book-anchor--${anchor.color}` : '',
               isActive ? 'book-anchor--active' : '',
             ]
               .filter(Boolean)
@@ -282,6 +302,7 @@ export const BookPane: React.FC<BookPaneProps> = ({
                 scrollContainerRef={scrollContainerRef}
                 onPreviewImage={onPreviewImage}
                 onImageLoaded={onImageLoaded}
+                onCreateImageCard={onCreateImageCard}
               />
             );
           }
@@ -363,64 +384,14 @@ export const BookPane: React.FC<BookPaneProps> = ({
       </div>
 
       {selectionDraft && (
-        <div
-          className="selection-popover"
-          style={{
-            left: `${selectionDraft.popupX}px`,
-            top: `${selectionDraft.popupY}px`,
-          }}
-        >
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--review"
-            title="只在书页上高亮，不创建卡片"
-            onClick={() => handleChooseStyle('highlight', undefined, false)}
-          >
-            <Highlighter size={14} />
-            <span>仅高亮</span>
-          </button>
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--revision"
-            title="只在书页上划线，不创建卡片"
-            onClick={() => handleChooseStyle('underline', undefined, false)}
-          >
-            <Underline size={14} />
-            <span>仅划线</span>
-          </button>
-          <div className="selection-popover__sep" />
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--review"
-            title="高亮并创建批注卡片"
-            onClick={() => handleChooseStyle('highlight', undefined, true)}
-          >
-            <Highlighter size={14} />
-            <span>高亮+卡</span>
-          </button>
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--revision"
-            title="划线并创建批注卡片"
-            onClick={() => handleChooseStyle('underline', undefined, true)}
-          >
-            <Underline size={14} />
-            <span>划线+卡</span>
-          </button>
-          {selectedCardId && (
-            <>
-              <div className="selection-popover__sep" />
-              <button
-                type="button"
-                className="selection-popover__btn selection-popover__btn--link"
-                onClick={() => handleChooseStyle('highlight', selectedCardId)}
-              >
-                <Link2 size={14} />
-                <span>连到选中卡片</span>
-              </button>
-            </>
-          )}
-        </div>
+        <SelectionPopover
+          x={selectionDraft.popupX}
+          y={selectionDraft.popupY}
+          quote={selectionDraft.quote}
+          selectedCardId={selectedCardId}
+          onAnnotate={handleAnnotateFromPopover}
+          onDismiss={handleDismissPopover}
+        />
       )}
     </div>
   );
@@ -432,6 +403,12 @@ interface EpubImageProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   onPreviewImage?: (blob: Blob, alt: string) => void;
   onImageLoaded?: (imagePath?: string, width?: number, height?: number) => void;
+  onCreateImageCard?: (
+    paragraphId: string,
+    blob: Blob,
+    alt: string,
+    anchorScreenY: number
+  ) => void;
 }
 
 const EpubImage: React.FC<EpubImageProps> = ({
@@ -440,6 +417,7 @@ const EpubImage: React.FC<EpubImageProps> = ({
   scrollContainerRef,
   onPreviewImage,
   onImageLoaded,
+  onCreateImageCard,
 }) => {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const blobRef = useRef<Blob | null>(null);
@@ -552,45 +530,84 @@ const EpubImage: React.FC<EpubImageProps> = ({
       }
     >
       {src ? (
-        <img
-          className="book-epub-image__img"
-          src={src}
-          alt={paragraph.imageAlt || ''}
-          loading="eager"
-          decoding="async"
-          title={onPreviewImage ? '点击放大查看' : undefined}
-          style={
-            inlineSize
-              ? { width: `${inlineSize}px`, height: 'auto' }
-              : undefined
-          }
-          onLoad={(e) => {
-            const img = e.currentTarget;
-            onImageLoaded?.(
-              paragraph.imagePath,
-              img.naturalWidth || undefined,
-              img.naturalHeight || undefined
-            );
-          }}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (!onPreviewImage) return;
-            if (blobRef.current) {
-              onPreviewImage(blobRef.current, paragraph.imageAlt || '');
-              return;
+        <>
+          <img
+            className="book-epub-image__img"
+            src={src}
+            alt={paragraph.imageAlt || ''}
+            loading="eager"
+            decoding="async"
+            title={onPreviewImage ? '点击放大查看' : undefined}
+            style={
+              inlineSize
+                ? { width: `${inlineSize}px`, height: 'auto' }
+                : undefined
             }
-            if (paragraph.imageSrc) {
-              fetch(paragraph.imageSrc)
-                .then((res) => res.blob())
-                .then((blob) => onPreviewImage(blob, paragraph.imageAlt || ''))
-                .catch(() => {});
-            }
-          }}
-          onError={() => {
-            setSrc(null);
-            setFailed(true);
-          }}
-        />
+            onLoad={(e) => {
+              const img = e.currentTarget;
+              onImageLoaded?.(
+                paragraph.imagePath,
+                img.naturalWidth || undefined,
+                img.naturalHeight || undefined
+              );
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!onPreviewImage) return;
+              if (blobRef.current) {
+                onPreviewImage(blobRef.current, paragraph.imageAlt || '');
+                return;
+              }
+              if (paragraph.imageSrc) {
+                fetch(paragraph.imageSrc)
+                  .then((res) => res.blob())
+                  .then((blob) => onPreviewImage(blob, paragraph.imageAlt || ''))
+                  .catch(() => {});
+              }
+            }}
+            onError={() => {
+              setSrc(null);
+              setFailed(true);
+            }}
+          />
+          {!isInlineImage && onCreateImageCard && (
+            <button
+              type="button"
+              className="book-epub-image__to-card"
+              title="将这张插图直接生成右侧批注卡片"
+              onClick={(e) => {
+                e.stopPropagation();
+                const rect = wrapperRef.current?.getBoundingClientRect();
+                const screenY = rect ? rect.top + rect.height / 2 : e.clientY;
+                if (blobRef.current) {
+                  onCreateImageCard(
+                    paragraph.id,
+                    blobRef.current,
+                    paragraph.imageAlt || '',
+                    screenY
+                  );
+                  return;
+                }
+                if (paragraph.imageSrc) {
+                  fetch(paragraph.imageSrc)
+                    .then((res) => res.blob())
+                    .then((blob) =>
+                      onCreateImageCard(
+                        paragraph.id,
+                        blob,
+                        paragraph.imageAlt || '',
+                        screenY
+                      )
+                    )
+                    .catch(() => {});
+                }
+              }}
+            >
+              <MessageSquarePlus size={12} />
+              <span>转成卡片</span>
+            </button>
+          )}
+        </>
       ) : (
         <div
           className={`book-epub-image__placeholder ${

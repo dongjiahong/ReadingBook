@@ -1,8 +1,8 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Highlighter, Link2, Underline, ZoomIn } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import * as pdfjsLib from 'pdfjs-dist';
-import type { AnnotationStyle, BookAnchor, NormalizedPdfRect, TocEntry } from '../types';
+import type { AnchorColor, AnnotationStyle, BookAnchor, NormalizedPdfRect, TocEntry } from '../types';
+import { SelectionPopover } from './SelectionPopover';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -79,6 +79,7 @@ interface PdfBookPaneProps {
     quote: string;
     rects: NormalizedPdfRect[];
     style: AnnotationStyle;
+    color?: AnchorColor;
     anchorScreenY: number;
     /** false 时只做基础标注，不创建卡片。 */
     withCard?: boolean;
@@ -374,101 +375,27 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
       )}
 
       {selectionDraft && (
-        <div
-          className="selection-popover"
-          style={{ left: `${selectionDraft.popupX}px`, top: `${selectionDraft.popupY}px` }}
-        >
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--review"
-            title="只在 PDF 上高亮，不创建卡片"
-            onClick={() => {
-              onCreatePdfAnnotation({
-                ...selectionDraft,
-                style: 'highlight',
-                withCard: false,
-              });
-              window.getSelection()?.removeAllRanges();
-              setSelectionDraft(null);
-            }}
-          >
-            <Highlighter size={14} />
-            <span>仅高亮</span>
-          </button>
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--revision"
-            title="只在 PDF 上划线，不创建卡片"
-            onClick={() => {
-              onCreatePdfAnnotation({
-                ...selectionDraft,
-                style: 'underline',
-                withCard: false,
-              });
-              window.getSelection()?.removeAllRanges();
-              setSelectionDraft(null);
-            }}
-          >
-            <Underline size={14} />
-            <span>仅划线</span>
-          </button>
-          <div className="selection-popover__sep" />
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--review"
-            title="高亮并创建批注卡片"
-            onClick={() => {
-              onCreatePdfAnnotation({
-                ...selectionDraft,
-                style: 'highlight',
-                withCard: true,
-              });
-              window.getSelection()?.removeAllRanges();
-              setSelectionDraft(null);
-            }}
-          >
-            <Highlighter size={14} />
-            <span>高亮+卡</span>
-          </button>
-          <button
-            type="button"
-            className="selection-popover__btn selection-popover__btn--revision"
-            title="划线并创建批注卡片"
-            onClick={() => {
-              onCreatePdfAnnotation({
-                ...selectionDraft,
-                style: 'underline',
-                withCard: true,
-              });
-              window.getSelection()?.removeAllRanges();
-              setSelectionDraft(null);
-            }}
-          >
-            <Underline size={14} />
-            <span>划线+卡</span>
-          </button>
-          {selectedCardId && (
-            <>
-              <div className="selection-popover__sep" />
-              <button
-                type="button"
-                className="selection-popover__btn selection-popover__btn--link"
-                onClick={() => {
-                  onCreatePdfAnnotation({
-                    ...selectionDraft,
-                    style: 'highlight',
-                    linkToExistingNodeId: selectedCardId,
-                  });
-                  window.getSelection()?.removeAllRanges();
-                  setSelectionDraft(null);
-                }}
-              >
-                <Link2 size={14} />
-                <span>连到选中卡片</span>
-              </button>
-            </>
-          )}
-        </div>
+        <SelectionPopover
+          x={selectionDraft.popupX}
+          y={selectionDraft.popupY}
+          quote={selectionDraft.quote}
+          selectedCardId={selectedCardId}
+          onAnnotate={(options) => {
+            onCreatePdfAnnotation({
+              ...selectionDraft,
+              style: options.style,
+              color: options.color,
+              withCard: options.withCard,
+              linkToExistingNodeId: options.linkToExistingNodeId,
+            });
+            window.getSelection()?.removeAllRanges();
+            setSelectionDraft(null);
+          }}
+          onDismiss={() => {
+            window.getSelection()?.removeAllRanges();
+            setSelectionDraft(null);
+          }}
+        />
       )}
     </div>
   );
@@ -732,20 +659,33 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
                 height: `${r.h * 100}%`,
                 background: isPin
                   ? 'rgba(37, 99, 235, 0.18)'
-                  : anchor.style === 'highlight'
-                    ? isActive
-                      ? 'rgba(235, 198, 92, 0.55)'
-                      : 'rgba(235, 198, 92, 0.35)'
-                    : isActive
-                      ? 'rgba(26, 143, 92, 0.12)'
-                      : 'transparent',
+                  : (() => {
+                      const c = anchor.color ?? (anchor.style === 'highlight' ? 'amber' : 'green');
+                      const bgMap = {
+                        amber: isActive ? 'rgba(235, 198, 92, 0.58)' : 'rgba(235, 198, 92, 0.35)',
+                        green: isActive ? 'rgba(22, 163, 74, 0.36)' : 'rgba(22, 163, 74, 0.2)',
+                        rose: isActive ? 'rgba(225, 29, 72, 0.34)' : 'rgba(225, 29, 72, 0.18)',
+                        blue: isActive ? 'rgba(37, 99, 235, 0.34)' : 'rgba(37, 99, 235, 0.18)',
+                      };
+                      if (anchor.style === 'highlight') return bgMap[c];
+                      return isActive ? bgMap[c] : 'transparent';
+                    })(),
                 border: isPin ? '1.5px solid #2563eb' : undefined,
                 borderRadius: isPin ? '4px' : '2px',
                 borderBottom: isPin
                   ? undefined
-                  : anchor.style === 'highlight'
-                    ? '2px solid #d49b1a'
-                    : '1.5px dashed #1a8f5c',
+                  : (() => {
+                      const c = anchor.color ?? (anchor.style === 'highlight' ? 'amber' : 'green');
+                      const lineMap = {
+                        amber: '#d49b1a',
+                        green: '#1a8f5c',
+                        rose: '#e11d48',
+                        blue: '#2563eb',
+                      };
+                      return anchor.style === 'highlight'
+                        ? `2px solid ${lineMap[c]}`
+                        : `1.5px dashed ${lineMap[c]}`;
+                    })(),
                 cursor: 'pointer',
                 pointerEvents: 'auto',
               }}
