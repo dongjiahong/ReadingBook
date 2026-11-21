@@ -21,6 +21,40 @@ export const ANCHOR_COLORS: {
   { id: 'blue', label: '思考蓝', swatch: '#2563eb', shortcut: '4' },
 ];
 
+const LS_STYLE_KEY = 'readingbook.lastAnnotationStyle';
+const LS_COLOR_KEY = 'readingbook.lastAnnotationColor';
+
+function readSavedStyle(): AnnotationStyle {
+  try {
+    const v = localStorage.getItem(LS_STYLE_KEY);
+    if (v === 'highlight' || v === 'underline') return v;
+  } catch {
+    // ignore storage errors
+  }
+  return 'highlight';
+}
+
+function readSavedColor(): AnchorColor {
+  try {
+    const v = localStorage.getItem(LS_COLOR_KEY);
+    if (v === 'amber' || v === 'green' || v === 'rose' || v === 'blue') return v;
+  } catch {
+    // ignore storage errors
+  }
+  return 'amber';
+}
+
+function persistSelectionPrefs(style: AnnotationStyle, color: AnchorColor) {
+  try {
+    if (style === 'highlight' || style === 'underline') {
+      localStorage.setItem(LS_STYLE_KEY, style);
+    }
+    localStorage.setItem(LS_COLOR_KEY, color);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 interface SelectionPopoverProps {
   x: number;
   y: number;
@@ -43,9 +77,19 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
   onAnnotate,
   onDismiss,
 }) => {
-  const [activeStyle, setActiveStyle] = useState<AnnotationStyle>('highlight');
-  const [activeColor, setActiveColor] = useState<AnchorColor>('amber');
+  const [activeStyle, setActiveStyle] = useState<AnnotationStyle>(readSavedStyle);
+  const [activeColor, setActiveColor] = useState<AnchorColor>(readSavedColor);
   const [copied, setCopied] = useState(false);
+
+  const commitAnnotate = (options: {
+    style: AnnotationStyle;
+    color: AnchorColor;
+    withCard: boolean;
+    linkToExistingNodeId?: string;
+  }) => {
+    persistSelectionPrefs(options.style, options.color);
+    onAnnotate(options);
+  };
 
   const handleCopy = () => {
     void navigator.clipboard?.writeText(quote).catch(() => {});
@@ -75,16 +119,19 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
       } else if (key === '1' || key === '2' || key === '3' || key === '4') {
         e.preventDefault();
         const color = ANCHOR_COLORS[Number(key) - 1].id;
-        onAnnotate({ style: activeStyle, color, withCard: false });
+        setActiveColor(color);
+        commitAnnotate({ style: activeStyle, color, withCard: false });
       } else if (key === 'h') {
         e.preventDefault();
-        onAnnotate({ style: 'highlight', color: activeColor, withCard: false });
+        setActiveStyle('highlight');
+        commitAnnotate({ style: 'highlight', color: activeColor, withCard: false });
       } else if (key === 'u') {
         e.preventDefault();
-        onAnnotate({ style: 'underline', color: activeColor, withCard: false });
+        setActiveStyle('underline');
+        commitAnnotate({ style: 'underline', color: activeColor, withCard: false });
       } else if (key === 'enter') {
         e.preventDefault();
-        onAnnotate({ style: activeStyle, color: activeColor, withCard: true });
+        commitAnnotate({ style: activeStyle, color: activeColor, withCard: true });
       } else if (key === 'c') {
         e.preventDefault();
         handleCopy();
@@ -120,7 +167,10 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
             activeStyle === 'highlight' ? 'is-active' : ''
           }`}
           title="高亮模式（快捷键 H 直接高亮）"
-          onClick={() => setActiveStyle('highlight')}
+          onClick={() => {
+            setActiveStyle('highlight');
+            persistSelectionPrefs('highlight', activeColor);
+          }}
         >
           <Highlighter size={13} />
         </button>
@@ -130,7 +180,10 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
             activeStyle === 'underline' ? 'is-active' : ''
           }`}
           title="划线模式（快捷键 U 直接划线）"
-          onClick={() => setActiveStyle('underline')}
+          onClick={() => {
+            setActiveStyle('underline');
+            persistSelectionPrefs('underline', activeColor);
+          }}
         >
           <Underline size={13} />
         </button>
@@ -151,7 +204,7 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
             title={`${item.label}${activeStyle === 'highlight' ? '高亮' : '划线'}（快捷键 ${item.shortcut}）`}
             onClick={() => {
               setActiveColor(item.id);
-              onAnnotate({
+              commitAnnotate({
                 style: activeStyle,
                 color: item.id,
                 withCard: false,
@@ -169,7 +222,7 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
         className="selection-popover__btn selection-popover__btn--primary"
         title="标注并创建空白批注卡（快捷键 Enter）"
         onClick={() =>
-          onAnnotate({
+          commitAnnotate({
             style: activeStyle,
             color: activeColor,
             withCard: true,
@@ -186,7 +239,7 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
           className="selection-popover__btn selection-popover__btn--link"
           title="将选中原文连线到当前选中的卡片"
           onClick={() =>
-            onAnnotate({
+            commitAnnotate({
               style: activeStyle,
               color: activeColor,
               withCard: true,

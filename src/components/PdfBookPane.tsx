@@ -71,6 +71,8 @@ interface PdfBookPaneProps {
   activeAnchorId: string | null;
   selectedCardId: string | null;
   isDraggingWireToBook: boolean;
+  cropMode?: boolean;
+  onExitCropMode?: () => void;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   onScroll: () => void;
   onPageRendered: () => void;
@@ -85,6 +87,12 @@ interface PdfBookPaneProps {
     withCard?: boolean;
     linkToExistingNodeId?: string;
   }) => void;
+  onCreatePdfCropCard?: (draft: {
+    pageNumber: number;
+    rect: NormalizedPdfRect;
+    blob: Blob;
+    anchorScreenY: number;
+  }) => void;
   onClickAnchor: (anchor: BookAnchor, point?: { x: number; y: number }) => void;
   onPreviewImage: (blob: Blob, alt: string) => void;
   onOutline?: (entries: TocEntry[]) => void;
@@ -98,10 +106,13 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
   activeAnchorId,
   selectedCardId,
   isDraggingWireToBook,
+  cropMode = false,
+  onExitCropMode,
   scrollContainerRef,
   onScroll,
   onPageRendered,
   onCreatePdfAnnotation,
+  onCreatePdfCropCard,
   onClickAnchor,
   onPreviewImage,
   onOutline,
@@ -240,10 +251,12 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
       const { pageNumber, pageEl, startX, startY, currentX, currentY } = boxDrag;
       setBoxDrag(null);
       const pageRect = pageEl.getBoundingClientRect();
-      const left = Math.min(startX, currentX);
-      const top = Math.min(startY, currentY);
-      const width = Math.abs(currentX - startX);
-      const height = Math.abs(currentY - startY);
+      const left = Math.max(pageRect.left, Math.min(startX, currentX));
+      const top = Math.max(pageRect.top, Math.min(startY, currentY));
+      const right = Math.min(pageRect.right, Math.max(startX, currentX));
+      const bottom = Math.min(pageRect.bottom, Math.max(startY, currentY));
+      const width = right - left;
+      const height = bottom - top;
 
       if (width > 14 && height > 10) {
         const normRect: NormalizedPdfRect = {
@@ -252,6 +265,32 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
           w: width / pageRect.width,
           h: height / pageRect.height,
         };
+        const canvas = pageEl.querySelector<HTMLCanvasElement>('canvas');
+        if (canvas && canvas.width > 0 && canvas.height > 0 && onCreatePdfCropCard) {
+          const sx = Math.round(normRect.x * canvas.width);
+          const sy = Math.round(normRect.y * canvas.height);
+          const sw = Math.max(1, Math.round(normRect.w * canvas.width));
+          const sh = Math.max(1, Math.round(normRect.h * canvas.height));
+          const offscreen = document.createElement('canvas');
+          offscreen.width = sw;
+          offscreen.height = sh;
+          const ctx = offscreen.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+            offscreen.toBlob((blob) => {
+              if (blob) {
+                onCreatePdfCropCard({
+                  pageNumber,
+                  rect: normRect,
+                  blob,
+                  anchorScreenY: top + height / 2,
+                });
+              }
+            }, 'image/png');
+            onExitCropMode?.();
+            return;
+          }
+        }
         setSelectionDraft({
           pageNumber,
           quote: `PDF 第 ${pageNumber} 页选区批注`,
@@ -260,6 +299,7 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
           popupY: Math.max(56, top - 10),
           anchorScreenY: top + height / 2,
         });
+        onExitCropMode?.();
         return;
       }
     }
@@ -306,13 +346,15 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
       popupY: Math.max(56, first.top - 10),
       anchorScreenY: last.top + last.height / 2,
     });
-  }, [boxDrag]);
+  }, [boxDrag, onCreatePdfCropCard, onExitCropMode]);
 
   const availableWidth = Math.max(280, containerWidth - 40);
 
   return (
     <div
-      className={`book-pane ${isDraggingWireToBook ? 'book-pane--drop-target' : ''}`}
+      className={`book-pane ${isDraggingWireToBook ? 'book-pane--drop-target' : ''} ${
+        cropMode ? 'book-pane--crop-mode' : ''
+      }`}
       onMouseUp={handleMouseUp}
       onMouseMove={(e) => {
         if (boxDrag) {
@@ -328,6 +370,11 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
             松开鼠标即可将卡片连接到当前指向的 PDF 句子或位置
           </div>
         )}
+        {cropMode && !isDraggingWireToBook && (
+          <div className="pdf-drop-hint-banner">
+            拖拽框选 PDF 图表区域直接生成右侧带图卡片（也可随时按住 ⌥ 拖拽，按 Esc 退出）
+          </div>
+        )}
         {errorMsg && <div className="book-error-banner">PDF 加载失败：{errorMsg}</div>}
         {pdfDoc &&
           pageNumbers.map((pageNo) => (
@@ -338,6 +385,7 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
               scale={scale}
               availableWidth={availableWidth}
               defaultAspectRatio={defaultAspectRatio}
+              cropMode={cropMode}
               scrollContainerRef={scrollContainerRef}
               anchors={anchorsByPage.get(pageNo) ?? EMPTY_ANCHORS}
               activeAnchorId={activeAnchorId}
@@ -409,6 +457,7 @@ interface PdfPageViewProps {
   scale: number;
   availableWidth: number;
   defaultAspectRatio: number;
+  cropMode: boolean;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   anchors: BookAnchor[];
   activeAnchorId: string | null;
@@ -424,6 +473,7 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
   scale,
   availableWidth,
   defaultAspectRatio,
+  cropMode,
   scrollContainerRef,
   anchors,
   activeAnchorId,
@@ -603,7 +653,7 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
       className="pdf-page-card"
       data-pdf-page={pageNumber}
       onMouseDown={(e) => {
-        if (e.altKey && pageCardRef.current) {
+        if ((cropMode || e.altKey) && pageCardRef.current) {
           e.preventDefault();
           onStartBoxSelect(pageCardRef.current, e.clientX, e.clientY);
         }

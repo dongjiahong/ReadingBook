@@ -1,5 +1,9 @@
-import React, { useEffect } from 'react';
-import { X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { join } from '@tauri-apps/api/path';
+import { open } from '@tauri-apps/plugin-dialog';
+import { FolderDown, FolderUp, X } from 'lucide-react';
+import { isDesktop } from '../services/library';
 import type { ReaderFont, ReaderSettings, ReaderTheme } from '../types';
 
 interface SettingsPanelProps {
@@ -23,22 +27,81 @@ const FONTS: { value: ReaderFont; label: string; stack: string }[] = [
 ];
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
-  open,
+  open: isOpen,
   settings,
   defaults,
   onClose,
   onChange,
 }) => {
+  const [backupStatus, setBackupStatus] = useState<{
+    kind: 'ok' | 'err';
+    text: string;
+  } | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+
   useEffect(() => {
-    if (!open) return;
+    if (!isOpen) {
+      setBackupStatus(null);
+      return;
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
+  }, [isOpen, onClose]);
 
-  if (!open) return null;
+  if (!isOpen) return null;
+
+  const handleBackupLibrary = async () => {
+    setBackupBusy(true);
+    setBackupStatus(null);
+    try {
+      const selected = await open({
+        title: '选择存放整库备份的文件夹',
+        directory: true,
+        multiple: false,
+      });
+      if (!selected || Array.isArray(selected)) return;
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+      const targetDir = await join(selected, `ReadingBook-Backup-${stamp}`);
+      await invoke<string>('export_library_backup', { targetDir });
+      setBackupStatus({ kind: 'ok', text: `整库备份已保存到 ReadingBook-Backup-${stamp}` });
+    } catch (err) {
+      setBackupStatus({
+        kind: 'err',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleRestoreLibrary = async () => {
+    setBackupBusy(true);
+    setBackupStatus(null);
+    try {
+      const selected = await open({
+        title: '选择之前导出的 ReadingBook 备份文件夹',
+        directory: true,
+        multiple: false,
+      });
+      if (!selected || Array.isArray(selected)) return;
+      await invoke('restore_library_backup', { sourceDir: selected });
+      setBackupStatus({ kind: 'ok', text: '备份恢复成功，正在重新加载书库…' });
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 650);
+    } catch (err) {
+      setBackupStatus({
+        kind: 'err',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
 
   return (
     <div className="settings-backdrop" onClick={onClose}>
@@ -146,6 +209,44 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               阅读时也可以拖拽书页右边缘临时调整，松手后自动记住。
             </p>
           </section>
+
+          {isDesktop() && (
+            <section className="settings-row">
+              <div className="settings-row__label">整库数据备份与恢复</div>
+              <div className="settings-backup-actions">
+                <button
+                  type="button"
+                  className="settings-backup-btn"
+                  disabled={backupBusy}
+                  onClick={() => void handleBackupLibrary()}
+                >
+                  <FolderDown size={13} />
+                  <span>导出整库备份</span>
+                </button>
+                <button
+                  type="button"
+                  className="settings-backup-btn"
+                  disabled={backupBusy}
+                  onClick={() => void handleRestoreLibrary()}
+                >
+                  <FolderUp size={13} />
+                  <span>从备份恢复</span>
+                </button>
+              </div>
+              {backupStatus && (
+                <p
+                  className={`settings-backup-status ${
+                    backupStatus.kind === 'err' ? 'is-error' : 'is-ok'
+                  }`}
+                >
+                  {backupStatus.text}
+                </p>
+              )}
+              <p className="settings-row__hint">
+                包含全部书籍、批注数据库与卡片附图，换机或重装系统时可一键迁移。
+              </p>
+            </section>
+          )}
         </div>
 
         <footer className="settings-panel__footer">

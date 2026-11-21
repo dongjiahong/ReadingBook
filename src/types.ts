@@ -53,6 +53,8 @@ export interface AnnotationCardItem {
   anchorOffsetY?: number;
   /** 思维导图式折叠：收起自身内容，并隐藏全部后代卡片。 */
   collapsed?: boolean;
+  /** 单卡自定义宽度（px，默认 248，可拖拽右边缘调整或切换宽卡）。 */
+  width?: number;
 }
 
 export interface CardEdge {

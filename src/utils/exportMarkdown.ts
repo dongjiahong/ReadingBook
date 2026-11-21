@@ -1,6 +1,6 @@
-import { appDataDir, join } from '@tauri-apps/api/path';
-import { save } from '@tauri-apps/plugin-dialog';
-import { writeFile } from '@tauri-apps/plugin-fs';
+import { invoke } from '@tauri-apps/api/core';
+import { join } from '@tauri-apps/api/path';
+import { open } from '@tauri-apps/plugin-dialog';
 import { isDesktop } from '../services/library';
 import type {
   AnnotationCardItem,
@@ -22,15 +22,9 @@ function sanitizeFileName(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'ReadingBook-批注';
 }
 
-async function resolveImageMarkdown(
-  image: CardImage,
-  dataDir: string | null
-): Promise<string> {
-  if (dataDir && image.filePath) {
-    const abs = await join(dataDir, image.filePath);
-    return `![批注附图](${encodeURI(`file://${abs}`)})`;
-  }
-  return `![批注附图](${image.id})`;
+function basenameOf(relPath: string): string {
+  const parts = relPath.split(/[/\\]/);
+  return parts[parts.length - 1] || relPath;
 }
 
 export async function buildBookAnnotationsMarkdown({
@@ -39,8 +33,8 @@ export async function buildBookAnnotationsMarkdown({
   cards,
   edges,
   paragraphs,
-}: ExportOptions): Promise<string> {
-  const dataDir = isDesktop() ? await appDataDir().catch(() => null) : null;
+}: ExportOptions): Promise<{ markdown: string; imageRelPaths: string[] }> {
+  const imageRelPathSet = new Set<string>();
   const paraOrder = new Map<string, number>();
   paragraphs.forEach((p, idx) => paraOrder.set(p.id, idx));
 
@@ -73,10 +67,16 @@ export async function buildBookAnnotationsMarkdown({
 
   const visited = new Set<string>();
 
-  const renderCardTree = async (
-    card: AnnotationCardItem,
-    depth: number
-  ): Promise<void> => {
+  const formatImageLine = (img: CardImage): string => {
+    if (img.filePath) {
+      imageRelPathSet.add(img.filePath);
+      const name = basenameOf(img.filePath);
+      return `![批注附图](assets/${encodeURIComponent(name)})`;
+    }
+    return `![批注附图](${img.id})`;
+  };
+
+  const renderCardTree = (card: AnnotationCardItem, depth: number): void => {
     if (visited.has(card.id)) return;
     visited.add(card.id);
 
@@ -93,8 +93,7 @@ export async function buildBookAnnotationsMarkdown({
     }
 
     for (const img of card.images ?? []) {
-      const md = await resolveImageMarkdown(img, dataDir);
-      lines.push(`${indent}  ${md}`);
+      lines.push(`${indent}  ${formatImageLine(img)}`);
     }
 
     const childIds = childrenByParent.get(card.id) ?? [];
@@ -103,7 +102,7 @@ export async function buildBookAnnotationsMarkdown({
       .filter((c): c is AnnotationCardItem => Boolean(c))
       .sort((a, b) => a.y - b.y);
     for (const child of childCards) {
-      await renderCardTree(child, depth + 1);
+      renderCardTree(child, depth + 1);
     }
   };
 
@@ -132,7 +131,7 @@ export async function buildBookAnnotationsMarkdown({
         lines.push(`> ${anchor.quote.trim().replace(/\n+/g, ' ')}${loc}`);
         lines.push('');
       }
-      await renderCardTree(card, 0);
+      renderCardTree(card, 0);
       lines.push('');
     }
   }
@@ -145,7 +144,7 @@ export async function buildBookAnnotationsMarkdown({
     lines.push('## 自由笔记卡片');
     lines.push('');
     for (const card of freeRoots) {
-      await renderCardTree(card, 0);
+      renderCardTree(card, 0);
       lines.push('');
     }
   }
@@ -173,32 +172,44 @@ export async function buildBookAnnotationsMarkdown({
     lines.push('');
   }
 
-  return lines.join('\n');
+  return {
+    markdown: lines.join('\n'),
+    imageRelPaths: Array.from(imageRelPathSet),
+  };
 }
 
 export async function exportBookAnnotationsToMarkdown(
   options: ExportOptions
-): Promise<boolean> {
-  const markdown = await buildBookAnnotationsMarkdown(options);
-  const defaultName = `${sanitizeFileName(options.bookTitle)}-批注.md`;
+): Promise<{ exported: boolean; imageCount: number }> {
+  const { markdown, imageRelPaths } = await buildBookAnnotationsMarkdown(options);
+  const safeTitle = sanitizeFileName(options.bookTitle);
+  const filename = `${safeTitle}-批注.md`;
 
   if (isDesktop()) {
-    const targetPath = await save({
-      title: '导出批注为 Markdown',
-      defaultPath: defaultName,
-      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    const selectedDir = await open({
+      title: '选择导出文件夹（将自动生成含 assets 图片目录的笔记文件夹）',
+      directory: true,
+      multiple: false,
     });
-    if (!targetPath) return false;
-    await writeFile(targetPath, new TextEncoder().encode(markdown));
-    return true;
+    if (!selectedDir || Array.isArray(selectedDir)) {
+      return { exported: false, imageCount: 0 };
+    }
+    const targetDir = await join(selectedDir, `${safeTitle}-笔记`);
+    const copiedCount = await invoke<number>('export_markdown_bundle', {
+      targetDir,
+      filename,
+      markdown,
+      imageRelPaths,
+    });
+    return { exported: true, imageCount: copiedCount };
   }
 
   const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = defaultName;
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
-  return true;
+  return { exported: true, imageCount: 0 };
 }

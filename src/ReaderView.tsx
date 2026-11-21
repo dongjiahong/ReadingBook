@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Bookmark,
   ChevronsDownUp,
   ChevronsUpDown,
   Copy,
+  Crop,
   Download,
   GitCommitHorizontal,
   Highlighter,
@@ -24,6 +26,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { AnnotationCard } from './components/AnnotationCard';
+import { AnnotationDrawer } from './components/AnnotationDrawer';
 import { BookPane } from './components/BookPane';
 import { ANCHOR_COLORS } from './components/SelectionPopover';
 import { ImageAnnotatorModal } from './components/ImageAnnotatorModal';
@@ -175,6 +178,8 @@ export default function ReaderView({
   const [docReady, setDocReady] = useState(false);
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [showToc, setShowToc] = useState(false);
+  const [showReviewDrawer, setShowReviewDrawer] = useState(false);
+  const [pdfCropMode, setPdfCropMode] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [readingProgress, setReadingProgress] = useState<number>(book.progress ?? 0);
@@ -442,16 +447,20 @@ export default function ReaderView({
 
   const handleExportMarkdown = useCallback(async () => {
     try {
-      const ok = await exportBookAnnotationsToMarkdown({
+      const res = await exportBookAnnotationsToMarkdown({
         bookTitle: bookTitle || book.title,
         anchors,
         cards,
         edges,
         paragraphs,
       });
-      if (ok) {
-        setExportNotice('已导出 Markdown');
-        window.setTimeout(() => setExportNotice(null), 2400);
+      if (res.exported) {
+        setExportNotice(
+          res.imageCount > 0
+            ? `已导出笔记与 ${res.imageCount} 张附图`
+            : '已导出 Markdown'
+        );
+        window.setTimeout(() => setExportNotice(null), 2600);
       }
     } catch (err) {
       console.warn('导出 Markdown 失败', err);
@@ -551,6 +560,12 @@ export default function ReaderView({
     },
     [getAnchorLocalY]
   );
+
+  const handleResizeCard = useCallback((cardId: string, nextWidth: number) => {
+    setCards((prev) =>
+      prev.map((c) => (c.id === cardId ? { ...c, width: nextWidth } : c))
+    );
+  }, []);
 
   const handleChangeBody = useCallback((cardId: string, newBody: string) => {
     setCards((prev) =>
@@ -1764,6 +1779,34 @@ export default function ReaderView({
     };
   }, [showToc]);
 
+  useEffect(() => {
+    if (!showReviewDrawer) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowReviewDrawer(false);
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('.review-drawer')) return;
+      if (target.closest('[data-review-toggle="true"]')) return;
+      setShowReviewDrawer(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('mousedown', onMouseDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('mousedown', onMouseDown);
+    };
+  }, [showReviewDrawer]);
+
+  useEffect(() => {
+    if (!pdfCropMode) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPdfCropMode(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pdfCropMode]);
+
   const handleTocJump = useCallback((entry: TocEntry) => {
     const selector =
       entry.kind === 'pdf'
@@ -2129,6 +2172,72 @@ export default function ReaderView({
     [findNonOverlappingY, pushUndoSnapshot]
   );
 
+  // 将 PDF 框选裁切区域直接转为右侧带图批注卡片并锚定到该 PDF 区域
+  const handleCreatePdfCropCard = useCallback(
+    async (draft: {
+      pageNumber: number;
+      rect: NormalizedPdfRect;
+      blob: Blob;
+      anchorScreenY: number;
+    }) => {
+      const file = new File(
+        [draft.blob],
+        `pdf-p${draft.pageNumber}-${Date.now()}.png`,
+        { type: 'image/png' }
+      );
+      const imported = await importImageFiles([file]);
+      if (imported.length === 0) return;
+
+      pushUndoSnapshot();
+      const anchorId = `anchor-${Date.now()}`;
+      const cardId = `card-${Date.now()}`;
+      const badgeNumber =
+        latestAnnotationsRef.current.anchors.filter((a) => a.kind === 'thought').length + 1;
+
+      const canvasRect = canvasRef.current?.getBoundingClientRect();
+      const rawY = canvasRect
+        ? Math.max(20, draft.anchorScreenY - canvasRect.top - 20)
+        : 100;
+      const cardX = (unifiedScrollRef.current?.scrollLeft ?? 0) + 44;
+      const candidateY = findNonOverlappingY(cardX, rawY, 180, cardsRef.current);
+
+      const newAnchor: BookAnchor = {
+        id: anchorId,
+        docFormat: 'pdf',
+        paragraphId: `pdf-page-${draft.pageNumber}`,
+        pdfPage: draft.pageNumber,
+        pdfRects: [draft.rect],
+        quote: `PDF 第 ${draft.pageNumber} 页图表截图`,
+        startOffset: 0,
+        endOffset: 0,
+        style: 'pin',
+        color: 'blue',
+        badgeNumber,
+        kind: 'thought',
+        targetNodeId: cardId,
+      };
+
+      const newCard: AnnotationCardItem = {
+        id: cardId,
+        x: cardX,
+        y: candidateY,
+        kind: 'thought',
+        badgeNumber,
+        body: '',
+        images: imported,
+        anchorId,
+        anchorOffsetY: Math.round(candidateY - rawY),
+      };
+
+      setAnchors((prev) => [...prev, newAnchor]);
+      setCards((prev) => [...prev, newCard]);
+      setActiveAnchorId(anchorId);
+      setSelectedCardId(cardId);
+      setAutoFocusCardId(cardId);
+    },
+    [findNonOverlappingY, pushUndoSnapshot]
+  );
+
   const handleClickBookAnchor = useCallback((anchor: BookAnchor, point?: { x: number; y: number }) => {
     setActiveAnchorId(anchor.id);
     // 基础标注没有关联卡片，点击后弹出删除入口。
@@ -2270,11 +2379,26 @@ export default function ReaderView({
               data-toc-toggle="true"
               className={`topbar__icon-btn ${showToc ? 'is-active' : ''}`}
               title="目录"
-              onClick={() => setShowToc((visible) => !visible)}
+              onClick={() => {
+                setShowReviewDrawer(false);
+                setShowToc((visible) => !visible);
+              }}
             >
               <ListTree size={15} />
             </button>
           )}
+          <button
+            type="button"
+            data-review-toggle="true"
+            className={`topbar__icon-btn ${showReviewDrawer ? 'is-active' : ''}`}
+            title="批注复盘列表（按颜色与附图筛选）"
+            onClick={() => {
+              setShowToc(false);
+              setShowReviewDrawer((visible) => !visible);
+            }}
+          >
+            <Bookmark size={15} />
+          </button>
           <div className="topbar__doc" data-tauri-drag-region>
             <span className="topbar__title" data-tauri-drag-region>
               {bookTitle}
@@ -2301,6 +2425,14 @@ export default function ReaderView({
         <div className="topbar__actions">
           {docFormat === 'pdf' && (
             <div className="topbar__zoom-group">
+              <button
+                type="button"
+                className={`topbar__icon-btn ${pdfCropMode ? 'is-active' : ''}`}
+                title="框选 PDF 图表直接生成右侧带图卡片（也可按住 ⌥ 拖拽）"
+                onClick={() => setPdfCropMode((v) => !v)}
+              >
+                <Crop size={15} />
+              </button>
               <button
                 type="button"
                 className="topbar__icon-btn"
@@ -2507,6 +2639,18 @@ export default function ReaderView({
         </aside>
       )}
 
+      {showReviewDrawer && (
+        <AnnotationDrawer
+          anchors={anchors}
+          cards={cards}
+          paragraphs={paragraphs}
+          onClose={() => setShowReviewDrawer(false)}
+          onSelect={(action) => {
+            handleSearchSelect(action);
+          }}
+        />
+      )}
+
       {/* Outer fixed-size container hosts the screen-sized SVG bridge */}
       <div ref={workspaceOuterRef} className="workspace-outer">
         {/* Single Native Unified Scroll Viewport */}
@@ -2543,10 +2687,13 @@ export default function ReaderView({
                   activeAnchorId={activeAnchorId}
                   selectedCardId={selectedCardId}
                   isDraggingWireToBook={Boolean(draggingWire && draggingWire.mode === 'to-book')}
+                  cropMode={pdfCropMode}
+                  onExitCropMode={() => setPdfCropMode(false)}
                   scrollContainerRef={unifiedScrollRef}
                   onScroll={handleScroll}
                   onPageRendered={bumpSync}
                   onCreatePdfAnnotation={handleCreatePdfAnnotation}
+                  onCreatePdfCropCard={handleCreatePdfCropCard}
                   onClickAnchor={handleClickBookAnchor}
                   onPreviewImage={handlePreviewBlob}
                   onOutline={setToc}
@@ -2619,39 +2766,48 @@ export default function ReaderView({
               </svg>
 
               {/* Draggable, Auto-Expanding Minimalist Cards */}
-              {visibleCards.map((card) => (
-                <AnnotationCard
-                  key={card.id}
-                  card={card}
-                  cardScale={cardScale}
-                  hiddenCount={hiddenCountByCard.get(card.id) ?? 0}
-                  isSelected={
-                    selectedCardId === card.id ||
-                    (activeAnchorId !== null && card.anchorId === activeAnchorId)
-                  }
-                  autoFocus={autoFocusCardId === card.id}
-                  onAutoFocused={() => setAutoFocusCardId(null)}
-                  onSelect={(id) => {
-                    setSelectedCardId(id);
-                    const found = cards.find((c) => c.id === id);
-                    if (found?.anchorId) setActiveAnchorId(found.anchorId);
-                  }}
-                  onMoveCard={handleMoveCard}
-                  onChangeBody={handleChangeBody}
-                  onAddImages={handleAddImages}
-                  onRemoveImage={handleRemoveImage}
-                  onPreviewImage={handlePreviewImage}
-                  onAnnotateImage={handleStartAnnotateImage}
-                  onUpdateStatus={handleUpdateStatus}
-                  onAddChild={handleAddChildCard}
-                  onDelete={handleDeleteCard}
-                  onFocusAnchor={handleFocusAnchor}
-                  onStartDragToBook={handleStartDragToBook}
-                  onStartDragToCard={handleStartDragToCard}
-                  onToggleCollapse={handleToggleCollapse}
-                  onLayoutChange={recomputeCardEdges}
-                />
-              ))}
+              {visibleCards.map((card) => {
+                const linkedAnchor = card.anchorId
+                  ? anchors.find((a) => a.id === card.anchorId)
+                  : undefined;
+                return (
+                  <AnnotationCard
+                    key={card.id}
+                    card={card}
+                    cardScale={cardScale}
+                    anchorColor={linkedAnchor?.color}
+                    anchorStyle={linkedAnchor?.style}
+                    hiddenCount={hiddenCountByCard.get(card.id) ?? 0}
+                    isSelected={
+                      selectedCardId === card.id ||
+                      (activeAnchorId !== null && card.anchorId === activeAnchorId)
+                    }
+                    autoFocus={autoFocusCardId === card.id}
+                    onAutoFocused={() => setAutoFocusCardId(null)}
+                    onSelect={(id) => {
+                      setSelectedCardId(id);
+                      const found = cards.find((c) => c.id === id);
+                      if (found?.anchorId) setActiveAnchorId(found.anchorId);
+                    }}
+                    onMoveCard={handleMoveCard}
+                    onResizeCard={handleResizeCard}
+                    onChangeBody={handleChangeBody}
+                    onAddImages={handleAddImages}
+                    onRemoveImage={handleRemoveImage}
+                    onPreviewImage={handlePreviewImage}
+                    onAnnotateImage={handleStartAnnotateImage}
+                    onUpdateStatus={handleUpdateStatus}
+                    onUpdateAnchor={handleUpdateAnchor}
+                    onAddChild={handleAddChildCard}
+                    onDelete={handleDeleteCard}
+                    onFocusAnchor={handleFocusAnchor}
+                    onStartDragToBook={handleStartDragToBook}
+                    onStartDragToCard={handleStartDragToCard}
+                    onToggleCollapse={handleToggleCollapse}
+                    onLayoutChange={recomputeCardEdges}
+                  />
+                );
+              })}
             </div>
           </div>
         </div>
