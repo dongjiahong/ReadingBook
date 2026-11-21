@@ -873,10 +873,10 @@ body,
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
 }
 
-/* Hover-only Floating Action Bar on top-right of card */
+/* Hover-only Floating Action Bar sitting cleanly above the top-right of card */
 .anno-card__floating-actions {
   position: absolute;
-  top: -13px;
+  bottom: calc(100% + 4px);
   right: 6px;
   display: flex;
   align-items: center;
@@ -890,6 +890,16 @@ body,
   pointer-events: none;
   transition: opacity 0.15s;
   z-index: 10;
+}
+
+/* Invisible hover bridge so moving the pointer from card to toolbar keeps hover active */
+.anno-card__floating-actions::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 8px;
 }
 
 .anno-card:hover .anno-card__floating-actions,
@@ -1119,12 +1129,39 @@ body,
 .img-annotator-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 6px;
   padding: 6px 10px;
   border-radius: 10px;
   background: #18181b;
   border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.img-annotator-selection-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 9px;
+  background: rgba(24, 24, 27, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.img-annotator-selection-label {
+  font-size: 11px;
+  color: #a1a1aa;
+  padding: 0 2px;
+}
+
+.img-annotator-selection-hint {
+  font-size: 11px;
+  color: #a1a1aa;
+  padding: 0 4px;
 }
 
 .img-annotator-btn {
@@ -1139,6 +1176,11 @@ body,
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+}
+
+.img-annotator-btn--compact {
+  padding: 3px 8px;
+  font-size: 11.5px;
 }
 
 .img-annotator-btn:hover:not(:disabled) {
@@ -1162,6 +1204,15 @@ body,
 
 .img-annotator-btn--primary:hover:not(:disabled) {
   background: #1d4ed8;
+}
+
+.img-annotator-btn--danger {
+  color: #fca5a5;
+}
+
+.img-annotator-btn--danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.22);
+  color: #fecaca;
 }
 
 .img-annotator-sep {
@@ -1195,7 +1246,7 @@ body,
 .img-annotator-stage {
   position: relative;
   max-width: 92vw;
-  max-height: calc(100vh - 104px);
+  max-height: calc(100vh - 144px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1204,7 +1255,7 @@ body,
 .img-annotator-canvas {
   display: block;
   max-width: 92vw;
-  max-height: calc(100vh - 104px);
+  max-height: calc(100vh - 144px);
   width: auto;
   height: auto;
   border-radius: 8px;
@@ -1214,14 +1265,17 @@ body,
 
 .img-annotator-text-input {
   position: absolute;
-  min-width: 150px;
-  padding: 4px 7px;
+  z-index: 20;
+  min-width: 168px;
+  max-width: 360px;
+  padding: 5px 8px;
   border-radius: 6px;
   border: 1.5px solid #3b82f6;
-  background: rgba(255, 255, 255, 0.94);
-  font-size: 13px;
+  background: rgba(255, 255, 255, 0.96);
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+  font-size: 14px;
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 1.32;
   outline: none;
   resize: both;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);

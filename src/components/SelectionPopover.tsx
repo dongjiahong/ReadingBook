@@ -16,7 +16,7 @@ export const ANCHOR_COLORS: {
   shortcut: string;
 }[] = [
   { id: 'amber', label: '重点黄', swatch: '#eab308', shortcut: '1' },
-  { id: 'green', label: '多头绿', swatch: '#16a34a', shortcut: '2' },
+  { id: 'green', label: '总结绿', swatch: '#16a34a', shortcut: '2' },
   { id: 'rose', label: '警示红', swatch: '#e11d48', shortcut: '3' },
   { id: 'blue', label: '思考蓝', swatch: '#2563eb', shortcut: '4' },
 ];
