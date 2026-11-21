@@ -9,6 +9,7 @@ import {
   Download,
   GitCommitHorizontal,
   Highlighter,
+  Images,
   LayoutGrid,
   ListTree,
   Loader2,
@@ -25,9 +26,11 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import { AnchorMinimap } from './components/AnchorMinimap';
 import { AnnotationCard } from './components/AnnotationCard';
 import { AnnotationDrawer } from './components/AnnotationDrawer';
 import { BookPane } from './components/BookPane';
+import { GalleryModal } from './components/GalleryModal';
 import { ANCHOR_COLORS } from './components/SelectionPopover';
 import { ImageAnnotatorModal } from './components/ImageAnnotatorModal';
 import { SearchModal, type SearchResultAction } from './components/SearchModal';
@@ -179,6 +182,7 @@ export default function ReaderView({
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [showToc, setShowToc] = useState(false);
   const [showReviewDrawer, setShowReviewDrawer] = useState(false);
+  const [showGallery, setShowGallery] = useState(false);
   const [pdfCropMode, setPdfCropMode] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
@@ -315,15 +319,47 @@ export default function ReaderView({
 
   // Compute card-to-card Bézier curves directly in right-canvas local coordinates
   const [cardEdgePaths, setCardEdgePaths] = useState<
-    { id: string; d: string; color: string }[]
+    { id: string; source: string; target: string; d: string; color: string }[]
   >([]);
+
+  // 聚焦降噪：选中某张卡片时，高亮其上下游链路，其余无关连线自动淡化
+  const focusedCardIds = useMemo<Set<string> | null>(() => {
+    if (!selectedCardId) return null;
+    const result = new Set<string>([selectedCardId]);
+    const neighbors = new Map<string, string[]>();
+    for (const edge of edges) {
+      const out = neighbors.get(edge.source) ?? [];
+      out.push(edge.target);
+      neighbors.set(edge.source, out);
+      const inc = neighbors.get(edge.target) ?? [];
+      inc.push(edge.source);
+      neighbors.set(edge.target, inc);
+    }
+    const queue = [selectedCardId];
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const nxt of neighbors.get(cur) ?? []) {
+        if (!result.has(nxt)) {
+          result.add(nxt);
+          queue.push(nxt);
+        }
+      }
+    }
+    return result;
+  }, [selectedCardId, edges]);
 
   const recomputeCardEdges = useCallback(() => {
     const canvasEl = canvasRef.current;
     if (!canvasEl) return;
     const canvasRect = canvasEl.getBoundingClientRect();
 
-    const nextPaths: { id: string; d: string; color: string }[] = [];
+    const nextPaths: {
+      id: string;
+      source: string;
+      target: string;
+      d: string;
+      color: string;
+    }[] = [];
     for (const edge of edges) {
       const srcEl = canvasEl.querySelector<HTMLElement>(
         `[data-card-id="${edge.source}"]`
@@ -345,6 +381,8 @@ export default function ReaderView({
       const d = `M ${x1.toFixed(1)} ${y1.toFixed(1)} C ${(x1 + dx).toFixed(1)} ${y1.toFixed(1)}, ${(x2 - dx).toFixed(1)} ${y2.toFixed(1)}, ${x2.toFixed(1)} ${y2.toFixed(1)}`;
       nextPaths.push({
         id: edge.id,
+        source: edge.source,
+        target: edge.target,
         d,
         color: edge.color || '#3b82f6',
       });
@@ -2399,6 +2437,18 @@ export default function ReaderView({
           >
             <Bookmark size={15} />
           </button>
+          <button
+            type="button"
+            className={`topbar__icon-btn ${showGallery ? 'is-active' : ''}`}
+            title="图卡复盘画廊与闪卡模式"
+            onClick={() => {
+              setShowToc(false);
+              setShowReviewDrawer(false);
+              setShowGallery(true);
+            }}
+          >
+            <Images size={15} />
+          </button>
           <div className="topbar__doc" data-tauri-drag-region>
             <span className="topbar__title" data-tauri-drag-region>
               {bookTitle}
@@ -2424,90 +2474,37 @@ export default function ReaderView({
 
         <div className="topbar__actions">
           {docFormat === 'pdf' && (
-            <div className="topbar__zoom-group">
-              <button
-                type="button"
-                className={`topbar__icon-btn ${pdfCropMode ? 'is-active' : ''}`}
-                title="框选 PDF 图表直接生成右侧带图卡片（也可按住 ⌥ 拖拽）"
-                onClick={() => setPdfCropMode((v) => !v)}
-              >
-                <Crop size={15} />
-              </button>
-              <button
-                type="button"
-                className="topbar__icon-btn"
-                title="缩小 PDF"
-                onClick={() => setPdfScale((s) => Math.max(0.6, +(s - 0.15).toFixed(2)))}
-              >
-                <ZoomOut size={15} />
-              </button>
-              <span className="topbar__zoom-label">{Math.round(pdfScale * 100)}%</span>
-              <button
-                type="button"
-                className="topbar__icon-btn"
-                title="放大 PDF"
-                onClick={() => setPdfScale((s) => Math.min(2.2, +(s + 0.15).toFixed(2)))}
-              >
-                <ZoomIn size={15} />
-              </button>
-            </div>
+            <>
+              <div className="topbar__zoom-group">
+                <button
+                  type="button"
+                  className={`topbar__icon-btn ${pdfCropMode ? 'is-active' : ''}`}
+                  title="框选 PDF 图表直接生成右侧带图卡片（也可按住 ⌥ 拖拽）"
+                  onClick={() => setPdfCropMode((v) => !v)}
+                >
+                  <Crop size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="topbar__icon-btn"
+                  title="缩小 PDF"
+                  onClick={() => setPdfScale((s) => Math.max(0.6, +(s - 0.15).toFixed(2)))}
+                >
+                  <ZoomOut size={15} />
+                </button>
+                <span className="topbar__zoom-label">{Math.round(pdfScale * 100)}%</span>
+                <button
+                  type="button"
+                  className="topbar__icon-btn"
+                  title="放大 PDF"
+                  onClick={() => setPdfScale((s) => Math.min(2.2, +(s + 0.15).toFixed(2)))}
+                >
+                  <ZoomIn size={15} />
+                </button>
+              </div>
+              <span className="topbar__divider" />
+            </>
           )}
-
-          <span className="topbar__divider" />
-
-          <button
-            type="button"
-            className="topbar__icon-btn"
-            title={
-              midLineMode === 'interline'
-                ? '引线走线：行间避字（点击切换为页边对齐）'
-                : '引线走线：页边对齐（点击切换为行间避字）'
-            }
-            onClick={() =>
-              setMidLineMode((m) => (m === 'interline' ? 'margin-align' : 'interline'))
-            }
-          >
-            <GitCommitHorizontal size={15} />
-          </button>
-
-          <div className="topbar__zoom-group" title="右侧卡片原地缩放（也可在画布按 ⌘+滚轮）">
-            <button
-              type="button"
-              className="topbar__icon-btn"
-              title="缩小卡片"
-              disabled={cardScale <= 0.5}
-              onClick={() =>
-                onSettingsChange({
-                  cardScale: Math.max(0.5, +(cardScale - 0.1).toFixed(2)),
-                })
-              }
-            >
-              <ZoomOut size={14} />
-            </button>
-            <button
-              type="button"
-              className="topbar__zoom-label topbar__zoom-reset"
-              title="点击恢复卡片 100% 大小"
-              onClick={() => onSettingsChange({ cardScale: 1 })}
-            >
-              {Math.round(cardScale * 100)}%
-            </button>
-            <button
-              type="button"
-              className="topbar__icon-btn"
-              title="放大卡片"
-              disabled={cardScale >= 1.2}
-              onClick={() =>
-                onSettingsChange({
-                  cardScale: Math.min(1.2, +(cardScale + 0.1).toFixed(2)),
-                })
-              }
-            >
-              <ZoomIn size={14} />
-            </button>
-          </div>
-
-          <span className="topbar__divider" />
 
           <button
             type="button"
@@ -2529,53 +2526,6 @@ export default function ReaderView({
             <Redo2 size={15} />
           </button>
 
-          <button
-            type="button"
-            className="topbar__icon-btn"
-            title="自动排列：按批注层级把卡片上下对称铺开"
-            onClick={() => {
-              pushUndoSnapshot();
-              handleAutoLayoutCards();
-            }}
-          >
-            <LayoutGrid size={15} />
-          </button>
-
-          {cards.length > 0 && (
-            <button
-              type="button"
-              className="topbar__icon-btn"
-              title={allCardsCollapsed ? '展开全部卡片' : '收起全部卡片'}
-              onClick={handleToggleCollapseAll}
-            >
-              {allCardsCollapsed ? (
-                <ChevronsUpDown size={15} />
-              ) : (
-                <ChevronsDownUp size={15} />
-              )}
-            </button>
-          )}
-
-          <button
-            type="button"
-            className="topbar__icon-btn"
-            title="新建自由卡片"
-            onClick={handleCreateFreeCard}
-          >
-            <PlusCircle size={15} />
-          </button>
-
-          <button
-            type="button"
-            className="topbar__icon-btn"
-            title="回到书页边缘"
-            onClick={() => {
-              unifiedScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' });
-            }}
-          >
-            <RotateCcw size={15} />
-          </button>
-
           <span className="topbar__divider" />
 
           {exportNotice && <span className="topbar__notice">{exportNotice}</span>}
@@ -2592,7 +2542,7 @@ export default function ReaderView({
           <button
             type="button"
             className="topbar__icon-btn"
-            title="导出本书批注为 Markdown"
+            title="导出本书批注与附图文件夹"
             onClick={() => void handleExportMarkdown()}
           >
             <Download size={15} />
@@ -2739,30 +2689,36 @@ export default function ReaderView({
             >
               {/* Card-to-Card SVG Edges */}
               <svg className="card-edges-svg">
-                {cardEdgePaths.map((edge) => (
-                  <g key={edge.id} className="card-edge-group">
-                    <path
-                      d={edge.d}
-                      fill="none"
-                      stroke={edge.color}
-                      strokeWidth={1.7}
-                      strokeOpacity={0.8}
-                    />
-                    <path
-                      d={edge.d}
-                      fill="none"
-                      stroke="transparent"
-                      strokeWidth={12}
-                      style={{ cursor: 'pointer', pointerEvents: 'stroke' }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEdges((prev) => prev.filter((ed) => ed.id !== edge.id));
-                      }}
-                    >
-                      <title>点击删除该连线</title>
-                    </path>
-                  </g>
-                ))}
+                {cardEdgePaths.map((edge) => {
+                  const isDimmed =
+                    focusedCardIds !== null &&
+                    !focusedCardIds.has(edge.source) &&
+                    !focusedCardIds.has(edge.target);
+                  return (
+                    <g key={edge.id} className="card-edge-group">
+                      <path
+                        d={edge.d}
+                        fill="none"
+                        stroke={edge.color}
+                        strokeWidth={isDimmed ? 1.4 : 1.8}
+                        strokeOpacity={isDimmed ? 0.16 : 0.86}
+                      />
+                      <path
+                        d={edge.d}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={12}
+                        style={{ cursor: 'pointer', pointerEvents: 'stroke' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEdges((prev) => prev.filter((ed) => ed.id !== edge.id));
+                        }}
+                      >
+                        <title>点击删除该连线</title>
+                      </path>
+                    </g>
+                  );
+                })}
               </svg>
 
               {/* Draggable, Auto-Expanding Minimalist Cards */}
@@ -2822,6 +2778,138 @@ export default function ReaderView({
           bookStickyRef={bookStickyRef}
           bridgeTriggerRef={bridgeTriggerRef}
         />
+
+        {/* Book Right-Edge 4-Color Anchor Minimap */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            bottom: 0,
+            left: `${Math.max(0, bookWidth - 13)}px`,
+            width: '12px',
+            pointerEvents: 'none',
+            zIndex: 22,
+          }}
+        >
+          <AnchorMinimap
+            docFormat={docFormat}
+            anchors={anchors}
+            paragraphs={paragraphs}
+            activeAnchorId={activeAnchorId}
+            onJumpAnchor={(anchor) => {
+              handleFocusAnchor(anchor.id);
+              if (anchor.targetNodeId) {
+                setSelectedCardId(anchor.targetNodeId);
+              }
+            }}
+          />
+        </div>
+
+        {/* Frosted-Glass Bottom-Right Canvas Floating Dock */}
+        <div className="canvas-floating-dock" aria-label="画布控制栏">
+          <div className="topbar__zoom-group" title="右侧卡片原地缩放（也可在画布按 ⌘+滚轮）">
+            <button
+              type="button"
+              className="topbar__icon-btn"
+              title="缩小卡片"
+              disabled={cardScale <= 0.5}
+              onClick={() =>
+                onSettingsChange({
+                  cardScale: Math.max(0.5, +(cardScale - 0.1).toFixed(2)),
+                })
+              }
+            >
+              <ZoomOut size={14} />
+            </button>
+            <button
+              type="button"
+              className="topbar__zoom-label topbar__zoom-reset"
+              title="点击恢复卡片 100% 大小"
+              onClick={() => onSettingsChange({ cardScale: 1 })}
+            >
+              {Math.round(cardScale * 100)}%
+            </button>
+            <button
+              type="button"
+              className="topbar__icon-btn"
+              title="放大卡片"
+              disabled={cardScale >= 1.2}
+              onClick={() =>
+                onSettingsChange({
+                  cardScale: Math.min(1.2, +(cardScale + 0.1).toFixed(2)),
+                })
+              }
+            >
+              <ZoomIn size={14} />
+            </button>
+          </div>
+
+          <span className="canvas-floating-dock__sep" />
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title="自动排列：按批注层级把卡片上下对称铺开"
+            onClick={() => {
+              pushUndoSnapshot();
+              handleAutoLayoutCards();
+            }}
+          >
+            <LayoutGrid size={15} />
+          </button>
+
+          {cards.length > 0 && (
+            <button
+              type="button"
+              className="topbar__icon-btn"
+              title={allCardsCollapsed ? '展开全部卡片' : '收起全部卡片'}
+              onClick={handleToggleCollapseAll}
+            >
+              {allCardsCollapsed ? (
+                <ChevronsUpDown size={15} />
+              ) : (
+                <ChevronsDownUp size={15} />
+              )}
+            </button>
+          )}
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title={
+              midLineMode === 'interline'
+                ? '引线走线：行间避字（点击切换为页边对齐）'
+                : '引线走线：页边对齐（点击切换为行间避字）'
+            }
+            onClick={() =>
+              setMidLineMode((m) => (m === 'interline' ? 'margin-align' : 'interline'))
+            }
+          >
+            <GitCommitHorizontal size={15} />
+          </button>
+
+          <span className="canvas-floating-dock__sep" />
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title="新建自由卡片"
+            onClick={handleCreateFreeCard}
+          >
+            <PlusCircle size={15} />
+          </button>
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title="回到书页边缘"
+            onClick={() => {
+              unifiedScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' });
+            }}
+          >
+            <RotateCcw size={15} />
+          </button>
+        </div>
       </div>
 
       {/* 基础标注（仅高亮/划线）的快捷管理条：换色 / 切换样式 / 升级为批注卡 / 复制 / 删除 */}
@@ -2916,6 +3004,16 @@ export default function ReaderView({
         cards={cards}
         onClose={() => setShowSearch(false)}
         onSelect={handleSearchSelect}
+      />
+
+      <GalleryModal
+        open={showGallery}
+        bookTitle={bookTitle || book.title}
+        anchors={anchors}
+        cards={cards}
+        paragraphs={paragraphs}
+        onClose={() => setShowGallery(false)}
+        onJump={handleSearchSelect}
       />
 
       {/* Built-in Image Annotator Modal (arrows, rectangles, text) */}

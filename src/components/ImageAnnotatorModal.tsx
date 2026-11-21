@@ -2,17 +2,27 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowUpRight,
   Check,
+  Highlighter,
+  Minus,
   Square,
   Type,
   Undo2,
   X,
 } from 'lucide-react';
 
-type AnnotatorTool = 'arrow' | 'rect' | 'text';
+type AnnotatorTool = 'arrow' | 'line' | 'rect' | 'highlighter' | 'text';
 
 type Shape =
   | {
       kind: 'arrow';
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      color: string;
+    }
+  | {
+      kind: 'line';
       x1: number;
       y1: number;
       x2: number;
@@ -25,6 +35,11 @@ type Shape =
       y: number;
       w: number;
       h: number;
+      color: string;
+    }
+  | {
+      kind: 'highlighter';
+      points: { x: number; y: number }[];
       color: string;
     }
   | {
@@ -46,6 +61,27 @@ interface ImageAnnotatorModalProps {
   imageUrl: string;
   onCancel: () => void;
   onSave: (file: File) => Promise<void> | void;
+}
+
+/** Snap endpoint to horizontal, vertical, or 45-degree angle when Shift is held. */
+function snapEndpoint(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  shiftKey: boolean
+): { x: number; y: number } {
+  if (!shiftKey) return { x: x2, y: y2 };
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1) return { x: x2, y: y2 };
+  const angle = Math.atan2(dy, dx);
+  const snapped = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+  return {
+    x: x1 + dist * Math.cos(snapped),
+    y: y1 + dist * Math.sin(snapped),
+  };
 }
 
 function drawShape(
@@ -83,8 +119,24 @@ function drawShape(
     );
     ctx.closePath();
     ctx.fill();
+  } else if (shape.kind === 'line') {
+    ctx.beginPath();
+    ctx.moveTo(shape.x1, shape.y1);
+    ctx.lineTo(shape.x2, shape.y2);
+    ctx.stroke();
   } else if (shape.kind === 'rect') {
     ctx.strokeRect(shape.x, shape.y, shape.w, shape.h);
+  } else if (shape.kind === 'highlighter') {
+    if (shape.points.length >= 2) {
+      ctx.globalAlpha = 0.32;
+      ctx.lineWidth = Math.max(14, 18 * strokeScale);
+      ctx.beginPath();
+      ctx.moveTo(shape.points[0].x, shape.points[0].y);
+      for (let i = 1; i < shape.points.length; i += 1) {
+        ctx.lineTo(shape.points[i].x, shape.points[i].y);
+      }
+      ctx.stroke();
+    }
   } else if (shape.kind === 'text') {
     const fontSize = Math.max(16, Math.round(20 * strokeScale));
     ctx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif`;
@@ -156,7 +208,10 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
 
-    const strokeScale = Math.max(0.75, Math.min(2.2, Math.max(canvas.width, canvas.height) / 900));
+    const strokeScale = Math.max(
+      0.75,
+      Math.min(2.2, Math.max(canvas.width, canvas.height) / 900)
+    );
     for (const s of shapes) drawShape(ctx, s, strokeScale);
     if (draftShape) drawShape(ctx, draftShape, strokeScale);
   }, [shapes, draftShape]);
@@ -240,19 +295,41 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
     const startX = pt.imgX;
     const startY = pt.imgY;
+    const strokePoints: { x: number; y: number }[] = [{ x: startX, y: startY }];
 
     const handleMove = (moveEvt: MouseEvent) => {
       const cur = toImageCoords(moveEvt.clientX, moveEvt.clientY);
       if (!cur) return;
       if (tool === 'arrow') {
+        const snapped = snapEndpoint(startX, startY, cur.imgX, cur.imgY, moveEvt.shiftKey);
         setDraftShape({
           kind: 'arrow',
           x1: startX,
           y1: startY,
-          x2: cur.imgX,
-          y2: cur.imgY,
+          x2: snapped.x,
+          y2: snapped.y,
           color,
         });
+      } else if (tool === 'line') {
+        const snapped = snapEndpoint(startX, startY, cur.imgX, cur.imgY, moveEvt.shiftKey);
+        setDraftShape({
+          kind: 'line',
+          x1: startX,
+          y1: startY,
+          x2: snapped.x,
+          y2: snapped.y,
+          color,
+        });
+      } else if (tool === 'highlighter') {
+        const last = strokePoints[strokePoints.length - 1];
+        if (Math.hypot(cur.imgX - last.x, cur.imgY - last.y) >= 3) {
+          strokePoints.push({ x: cur.imgX, y: cur.imgY });
+          setDraftShape({
+            kind: 'highlighter',
+            points: [...strokePoints],
+            color,
+          });
+        }
       } else {
         setDraftShape({
           kind: 'rect',
@@ -271,12 +348,30 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       const end = toImageCoords(upEvt.clientX, upEvt.clientY);
       setDraftShape(null);
       if (!end) return;
+
+      if (tool === 'highlighter') {
+        if (strokePoints.length >= 2) {
+          setShapes((prev) => [
+            ...prev,
+            { kind: 'highlighter', points: [...strokePoints], color },
+          ]);
+        }
+        return;
+      }
+
       const dist = Math.hypot(end.imgX - startX, end.imgY - startY);
       if (dist < 6) return;
       if (tool === 'arrow') {
+        const snapped = snapEndpoint(startX, startY, end.imgX, end.imgY, upEvt.shiftKey);
         setShapes((prev) => [
           ...prev,
-          { kind: 'arrow', x1: startX, y1: startY, x2: end.imgX, y2: end.imgY, color },
+          { kind: 'arrow', x1: startX, y1: startY, x2: snapped.x, y2: snapped.y, color },
+        ]);
+      } else if (tool === 'line') {
+        const snapped = snapEndpoint(startX, startY, end.imgX, end.imgY, upEvt.shiftKey);
+        setShapes((prev) => [
+          ...prev,
+          { kind: 'line', x1: startX, y1: startY, x2: snapped.x, y2: snapped.y, color },
         ]);
       } else {
         setShapes((prev) => [
@@ -328,11 +423,20 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         <button
           type="button"
           className={`img-annotator-btn ${tool === 'arrow' ? 'is-active' : ''}`}
-          title="画箭头"
+          title="画箭头（按住 Shift 锁定水平/垂直/45°）"
           onClick={() => setTool('arrow')}
         >
           <ArrowUpRight size={15} />
           <span>箭头</span>
+        </button>
+        <button
+          type="button"
+          className={`img-annotator-btn ${tool === 'line' ? 'is-active' : ''}`}
+          title="画趋势线/支撑阻力线（按住 Shift 自动水平或垂直）"
+          onClick={() => setTool('line')}
+        >
+          <Minus size={15} />
+          <span>趋势线</span>
         </button>
         <button
           type="button"
@@ -342,6 +446,15 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         >
           <Square size={14} />
           <span>方框</span>
+        </button>
+        <button
+          type="button"
+          className={`img-annotator-btn ${tool === 'highlighter' ? 'is-active' : ''}`}
+          title="半透明荧光笔（标出关键 K 线区间）"
+          onClick={() => setTool('highlighter')}
+        >
+          <Highlighter size={14} />
+          <span>荧光笔</span>
         </button>
         <button
           type="button"

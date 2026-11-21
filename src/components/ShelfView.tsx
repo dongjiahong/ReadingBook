@@ -1,5 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Loader2, Plus, Settings, Trash2 } from 'lucide-react';
+import {
+  ArrowRight,
+  BookOpen,
+  Image as ImageIcon,
+  Loader2,
+  Plus,
+  Settings,
+  StickyNote,
+  Trash2,
+} from 'lucide-react';
+import { loadAllBookAnnotations } from '../services/db';
 import { getCoverUrl } from '../services/library';
 import type { BookRecord } from '../types';
 
@@ -14,6 +24,12 @@ interface ShelfViewProps {
   onOpenSettings: () => void;
 }
 
+interface BookStats {
+  cards: number;
+  images: number;
+  anchors: number;
+}
+
 export const ShelfView: React.FC<ShelfViewProps> = ({
   books,
   desktop,
@@ -24,6 +40,36 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
   onDelete,
   onOpenSettings,
 }) => {
+  const [statsByBook, setStatsByBook] = useState<Record<string, BookStats>>({});
+
+  useEffect(() => {
+    if (!desktop || books.length === 0) return;
+    let alive = true;
+    void loadAllBookAnnotations()
+      .then((list) => {
+        if (!alive) return;
+        const map: Record<string, BookStats> = {};
+        for (const item of list) {
+          const images = item.annotations.cards.reduce(
+            (sum, c) => sum + (c.images?.length ?? 0),
+            0
+          );
+          map[item.bookId] = {
+            cards: item.annotations.cards.length,
+            images,
+            anchors: item.annotations.anchors.length,
+          };
+        }
+        setStatsByBook(map);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [desktop, books]);
+
+  const recentBook = books.find((b) => b.lastOpenedAt !== null) ?? books[0] ?? null;
+
   return (
     <div className="shelf">
       <header className="shelf__header" data-tauri-drag-region>
@@ -65,11 +111,20 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
         )}
         {error && <div className="shelf__error">{error}</div>}
 
+        {recentBook && (
+          <ContinueReadingHero
+            book={recentBook}
+            stats={statsByBook[recentBook.id]}
+            onOpen={() => onOpen(recentBook)}
+          />
+        )}
+
         <div className="shelf__grid">
           {books.map((book) => (
             <BookCard
               key={book.id}
               book={book}
+              stats={statsByBook[book.id]}
               onOpen={() => onOpen(book)}
               onDelete={onDelete}
             />
@@ -97,13 +152,103 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
   );
 };
 
+interface ContinueReadingHeroProps {
+  book: BookRecord;
+  stats?: BookStats;
+  onOpen: () => void;
+}
+
+const ContinueReadingHero: React.FC<ContinueReadingHeroProps> = ({
+  book,
+  stats,
+  onOpen,
+}) => {
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    if (book.coverPath) {
+      void getCoverUrl(book)
+        .then((url) => {
+          if (alive) setCoverUrl(url);
+        })
+        .catch(() => {});
+    } else {
+      setCoverUrl(null);
+    }
+    return () => {
+      alive = false;
+    };
+  }, [book.id, book.coverPath]);
+
+  const percent = Math.round((book.progress ?? 0) * 100);
+
+  return (
+    <section
+      className="shelf-hero"
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+    >
+      <div className="shelf-hero__cover">
+        {coverUrl ? (
+          <img src={coverUrl} alt={`${book.title} 封面`} />
+        ) : (
+          <div className="book-card__cover-fallback">
+            <BookOpen size={24} />
+          </div>
+        )}
+        <span className="book-card__spine" aria-hidden="true" />
+      </div>
+
+      <div className="shelf-hero__content">
+        <span className="shelf-hero__eyebrow">继续阅读</span>
+        <h2 className="shelf-hero__title">{book.title}</h2>
+        <div className="shelf-hero__author">
+          {book.author || '未知作者'} · {book.format.toUpperCase()}
+        </div>
+
+        <div className="shelf-hero__stats">
+          <span className="shelf-hero__stat">
+            <StickyNote size={12} />
+            <span>{stats?.cards ?? 0} 张批注卡</span>
+          </span>
+          <span className="shelf-hero__stat">
+            <ImageIcon size={12} />
+            <span>{stats?.images ?? 0} 张图表</span>
+          </span>
+        </div>
+
+        <div className="shelf-hero__progress-row">
+          <div className="shelf-hero__progress-bar">
+            <span style={{ width: `${Math.min(100, percent)}%` }} />
+          </div>
+          <span className="shelf-hero__progress-text">{percent}%</span>
+        </div>
+      </div>
+
+      <span className="shelf-hero__cta">
+        <span>继续阅读</span>
+        <ArrowRight size={14} />
+      </span>
+    </section>
+  );
+};
+
 interface BookCardProps {
   book: BookRecord;
+  stats?: BookStats;
   onOpen: () => void;
   onDelete: (book: BookRecord) => void;
 }
 
-const BookCard: React.FC<BookCardProps> = ({ book, onOpen, onDelete }) => {
+const BookCard: React.FC<BookCardProps> = ({ book, stats, onOpen, onDelete }) => {
   const [coverUrl, setCoverUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -145,6 +290,7 @@ const BookCard: React.FC<BookCardProps> = ({ book, onOpen, onDelete }) => {
             <BookOpen size={22} />
           </div>
         )}
+        <span className="book-card__spine" aria-hidden="true" />
         <button
           type="button"
           className="book-card__delete"
@@ -163,14 +309,13 @@ const BookCard: React.FC<BookCardProps> = ({ book, onOpen, onDelete }) => {
         <div className="book-card__title" title={book.title}>
           {book.title}
         </div>
-        <div className="book-card__author">
-          {book.author || '未知作者'}
-        </div>
+        <div className="book-card__author">{book.author || '未知作者'}</div>
         <div className="book-card__progress">
           <span style={{ width: `${Math.min(100, percent)}%` }} />
         </div>
         <div className="book-card__meta">
           {percent > 0 ? `已读 ${percent}%` : '尚未开始'}
+          {stats && stats.cards > 0 ? ` · ${stats.cards} 笔记` : ''}
         </div>
       </div>
     </div>

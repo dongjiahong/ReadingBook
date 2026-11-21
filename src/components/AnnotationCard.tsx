@@ -329,6 +329,7 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
       className={[
         'anno-card',
         `anno-card--${kind}`,
+        anchorId ? `anno-card--accent-${effectiveAnchorColor}` : '',
         isSelected ? 'anno-card--active' : '',
         isDragOver ? 'anno-card--dragover' : '',
       ]

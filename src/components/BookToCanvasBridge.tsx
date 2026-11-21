@@ -247,13 +247,14 @@ export const BookToCanvasBridge: React.FC<BookToCanvasBridgeProps> = React.memo(
           }
 
           const isActive = curActiveId === anchor.id;
+          const isDimmed = Boolean(curActiveId) && !isActive;
           group.style.display = '';
 
           pathEl.setAttribute('d', d);
           pathEl.setAttribute('stroke-width', isActive ? '2.4' : '1.5');
           pathEl.setAttribute(
             'stroke-opacity',
-            clamped ? '0.45' : isActive ? '1' : '0.78'
+            isDimmed ? '0.2' : clamped ? '0.45' : isActive ? '1' : '0.78'
           );
           if (clamped) {
             pathEl.setAttribute('stroke-dasharray', '4 4');
@@ -264,7 +265,10 @@ export const BookToCanvasBridge: React.FC<BookToCanvasBridgeProps> = React.memo(
           circleEl.setAttribute('cx', x1.toFixed(1));
           circleEl.setAttribute('cy', y1.toFixed(1));
           circleEl.setAttribute('r', isActive ? '3.6' : '2.6');
-          circleEl.setAttribute('fill-opacity', clamped ? '0.5' : '0.95');
+          circleEl.setAttribute(
+            'fill-opacity',
+            isDimmed ? '0.24' : clamped ? '0.5' : '0.95'
+          );
         }
       };
 
