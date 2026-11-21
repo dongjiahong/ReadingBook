@@ -22,6 +22,7 @@ interface BookPaneProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   epubImageLoader?: EpubImageLoader | null;
   onPreviewImage?: (blob: Blob, alt: string) => void;
+  onImageLoaded?: () => void;
   onScroll: () => void;
   onCreateAnnotation: (draft: {
     paragraphId: string;
@@ -46,6 +47,7 @@ export const BookPane: React.FC<BookPaneProps> = ({
   scrollContainerRef,
   epubImageLoader,
   onPreviewImage,
+  onImageLoaded,
   onScroll,
   onCreateAnnotation,
   onClickAnchor,
@@ -179,36 +181,59 @@ export const BookPane: React.FC<BookPaneProps> = ({
     const text = paragraph.text ?? '';
     const paraAnchors = anchors
       .filter((a) => a.paragraphId === paragraph.id)
-      .sort((a, b) => a.startOffset - b.startOffset);
+      .map((anchor) => ({
+        anchor,
+        start: Math.max(0, Math.min(anchor.startOffset, text.length)),
+        end: Math.max(0, Math.min(anchor.endOffset, text.length)),
+      }))
+      .filter((item) => item.end > item.start);
 
     if (paraAnchors.length === 0) {
       return renderFormattedSlice(paragraph, 0, text.length, 'fmt');
     }
 
+    // 按所有标注起止点切分原子区间，支持同段落内重叠/嵌套高亮与划线同时渲染。
+    const pointSet = new Set<number>([0, text.length]);
+    for (const item of paraAnchors) {
+      pointSet.add(item.start);
+      pointSet.add(item.end);
+    }
+    const points = Array.from(pointSet).sort((a, b) => a - b);
+    const firstRenderedAnchor = new Set<string>();
     const segments: React.ReactNode[] = [];
-    let cursor = 0;
 
-    for (const anchor of paraAnchors) {
-      const start = Math.max(cursor, Math.min(anchor.startOffset, text.length));
-      const end = Math.max(start, Math.min(anchor.endOffset, text.length));
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const segStart = points[i];
+      const segEnd = points[i + 1];
+      if (segEnd <= segStart) continue;
 
-      if (start > cursor) {
-        segments.push(
-          <React.Fragment key={`plain-${cursor}`}>
-            {renderFormattedSlice(paragraph, cursor, start, `p-${cursor}`)}
-          </React.Fragment>
-        );
-      }
+      const covering = paraAnchors
+        .filter((item) => item.start < segEnd && item.end > segStart)
+        .sort((a, b) => b.end - b.start - (a.end - a.start));
 
-      if (end > start) {
+      let node: React.ReactNode = renderFormattedSlice(
+        paragraph,
+        segStart,
+        segEnd,
+        `seg-${segStart}`
+      );
+
+      // 从内到外包裹，确保最内层（或更精确的）标注优先响应点击，同时每层都保留 data-anchor-group。
+      for (let j = covering.length - 1; j >= 0; j -= 1) {
+        const { anchor } = covering[j];
         const isActive = activeAnchorId === anchor.id;
-        segments.push(
+        const isFirst = !firstRenderedAnchor.has(anchor.id);
+        if (isFirst) firstRenderedAnchor.add(anchor.id);
+        node = (
           <span
-            key={anchor.id}
-            data-anchor-id={anchor.id}
+            key={`${anchor.id}-${segStart}`}
+            data-anchor-id={isFirst ? anchor.id : undefined}
+            data-anchor-group={anchor.id}
             className={[
               'book-anchor',
-              anchor.style === 'highlight' ? 'book-anchor--highlight' : 'book-anchor--underline',
+              anchor.style === 'highlight'
+                ? 'book-anchor--highlight'
+                : 'book-anchor--underline',
               isActive ? 'book-anchor--active' : '',
             ]
               .filter(Boolean)
@@ -223,19 +248,13 @@ export const BookPane: React.FC<BookPaneProps> = ({
                 : '点击管理该标注'
             }
           >
-            {renderFormattedSlice(paragraph, start, end, `a-${anchor.id}`)}
+            {node}
           </span>
         );
       }
 
-      cursor = end;
-    }
-
-    if (cursor < text.length) {
       segments.push(
-        <React.Fragment key={`plain-end-${cursor}`}>
-          {renderFormattedSlice(paragraph, cursor, text.length, `e-${cursor}`)}
-        </React.Fragment>
+        <React.Fragment key={`slice-${segStart}`}>{node}</React.Fragment>
       );
     }
 
@@ -262,6 +281,7 @@ export const BookPane: React.FC<BookPaneProps> = ({
                 loader={epubImageLoader ?? null}
                 scrollContainerRef={scrollContainerRef}
                 onPreviewImage={onPreviewImage}
+                onImageLoaded={onImageLoaded}
               />
             );
           }
@@ -280,7 +300,7 @@ export const BookPane: React.FC<BookPaneProps> = ({
           if (p.type === 'stage') {
             return (
               <p key={p.id} className="book-stage" data-paragraph-id={p.id}>
-                <em>A room in the castle.</em> Enter <strong>Hamlet.</strong>
+                {renderTextWithAnchors(p)}
               </p>
             );
           }
@@ -411,6 +431,7 @@ interface EpubImageProps {
   loader: EpubImageLoader | null;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   onPreviewImage?: (blob: Blob, alt: string) => void;
+  onImageLoaded?: () => void;
 }
 
 const EpubImage: React.FC<EpubImageProps> = ({
@@ -418,6 +439,7 @@ const EpubImage: React.FC<EpubImageProps> = ({
   loader,
   scrollContainerRef,
   onPreviewImage,
+  onImageLoaded,
 }) => {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const blobRef = useRef<Blob | null>(null);
@@ -542,6 +564,9 @@ const EpubImage: React.FC<EpubImageProps> = ({
               ? { width: `${inlineSize}px`, height: 'auto' }
               : undefined
           }
+          onLoad={() => {
+            onImageLoaded?.();
+          }}
           onClick={(e) => {
             e.stopPropagation();
             if (!onPreviewImage) return;

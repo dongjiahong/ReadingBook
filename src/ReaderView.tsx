@@ -43,17 +43,33 @@ import { computeCardFoldState } from './utils/cardTree';
 import { nearestFreeY, type PlacementBox } from './utils/cardPlacement';
 import {
   createFullImageUrl,
-  releaseImage,
+  deleteStoredImage,
   restoreThumbUrls,
+  revokeImageUrl,
+  revokeObjectUrlIfBlob,
 } from './utils/imageStore';
 
 const DEFAULT_FREE_CARD_TEXT = '可在右侧无限画布任意摆放，支持粘贴截图或拖入图片。';
 
-function parseLocator(locator: string | null): { top: number; left: number } | null {
+interface SavedLocator {
+  top: number;
+  left: number;
+  paragraphId?: string;
+  pdfPage?: number;
+  offsetY?: number;
+}
+
+function parseLocator(locator: string | null): SavedLocator | null {
   if (!locator) return null;
   try {
-    const parsed = JSON.parse(locator) as { top?: number; left?: number };
-    return { top: Number(parsed.top) || 0, left: Number(parsed.left) || 0 };
+    const parsed = JSON.parse(locator) as Partial<SavedLocator>;
+    return {
+      top: Number(parsed.top) || 0,
+      left: Number(parsed.left) || 0,
+      paragraphId: typeof parsed.paragraphId === 'string' ? parsed.paragraphId : undefined,
+      pdfPage: typeof parsed.pdfPage === 'number' && Number.isFinite(parsed.pdfPage) ? parsed.pdfPage : undefined,
+      offsetY: typeof parsed.offsetY === 'number' && Number.isFinite(parsed.offsetY) ? parsed.offsetY : undefined,
+    };
   } catch {
     return null;
   }
@@ -92,13 +108,26 @@ export default function ReaderView({
   const progressTimerRef = useRef<number | null>(null);
   const lastProgressRef = useRef<{ progress: number; locator: string } | null>(null);
   const hydratedRef = useRef(false);
-  const restoreScrollRef = useRef<{ top: number; left: number } | null>(null);
+  const restoreScrollRef = useRef<SavedLocator | null>(null);
+  const activeRestoreTargetRef = useRef<SavedLocator | null>(null);
+  const userInteractedAfterOpenRef = useRef(false);
+  const imageAlignTimerRef = useRef<number | null>(null);
+  const pendingInitialAlignRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
+  const dirtyAnnotationsRef = useRef(false);
+  const latestAnnotationsRef = useRef<{
+    bookId: string;
+    anchors: BookAnchor[];
+    cards: AnnotationCardItem[];
+    edges: CardEdge[];
+  }>({ bookId: book.id, anchors: [], cards: [], edges: [] });
 
   const [bookWidth, setBookWidth] = useState<number>(settings.bookWidth);
   const [isResizing, setIsResizing] = useState(false);
   const [docReady, setDocReady] = useState(false);
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [showToc, setShowToc] = useState(false);
+  const [readingProgress, setReadingProgress] = useState<number>(book.progress ?? 0);
 
   const [docFormat, setDocFormat] = useState<DocFormat>('epub');
   const [bookTitle, setBookTitle] = useState<string>('');
@@ -142,15 +171,25 @@ export default function ReaderView({
 
   const closePreviewImage = useCallback(() => {
     const current = previewImageRef.current;
-    if (current) URL.revokeObjectURL(current.url);
+    if (current) revokeObjectUrlIfBlob(current.url);
     previewImageRef.current = null;
     setPreviewImage(null);
   }, []);
 
-  const releaseCardImages = useCallback((list: AnnotationCardItem[]) => {
+  // 仅释放内存中的 ObjectURL，绝不删除磁盘或数据库中的持久化图片。
+  const revokeCardImageUrls = useCallback((list: AnnotationCardItem[]) => {
     for (const card of list) {
       for (const image of card.images ?? []) {
-        releaseImage(image.id);
+        revokeImageUrl(image.id);
+      }
+    }
+  }, []);
+
+  // 仅在用户主动删除卡片时调用，同步清理持久化的图片文件。
+  const deleteCardImages = useCallback((list: AnnotationCardItem[]) => {
+    for (const card of list) {
+      for (const image of card.images ?? []) {
+        void deleteStoredImage(image);
       }
     }
   }, []);
@@ -174,15 +213,15 @@ export default function ReaderView({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewImage, closePreviewImage]);
 
-  // Release thumbnail URLs and preview URL when the app unmounts
+  // Release in-memory thumbnail URLs and preview URL when leaving the book
   useEffect(() => {
     return () => {
       const current = previewImageRef.current;
-      if (current) URL.revokeObjectURL(current.url);
+      if (current) revokeObjectUrlIfBlob(current.url);
       previewImageRef.current = null;
-      releaseCardImages(cardsRef.current);
+      revokeCardImageUrls(cardsRef.current);
     };
-  }, [releaseCardImages]);
+  }, [revokeCardImageUrls]);
 
   // Mind-map style folding: a collapsed card hides its whole descendant subtree.
   const { hidden: hiddenCardIds, hiddenCounts: hiddenCountByCard } = useMemo(
@@ -276,7 +315,7 @@ export default function ReaderView({
 
   const handleAddImages = useCallback((cardId: string, newImages: CardImage[]) => {
     if (!cardsRef.current.some((card) => card.id === cardId)) {
-      for (const image of newImages) releaseImage(image.id);
+      for (const image of newImages) void deleteStoredImage(image);
       return;
     }
     setCards((prev) =>
@@ -298,7 +337,7 @@ export default function ReaderView({
             : c
         )
       );
-      releaseImage(image.id);
+      void deleteStoredImage(image);
       if (previewImageRef.current?.id === image.id) {
         closePreviewImage();
       }
@@ -307,11 +346,11 @@ export default function ReaderView({
   );
 
   const handlePreviewImage = useCallback(async (image: CardImage) => {
-    const url = await createFullImageUrl(image.id);
+    const url = await createFullImageUrl(image);
     if (!url) return;
 
     const current = previewImageRef.current;
-    if (current) URL.revokeObjectURL(current.url);
+    if (current) revokeObjectUrlIfBlob(current.url);
     const next = { id: image.id, url, alt: '批注附图', zoomable: false };
     previewImageRef.current = next;
     setPreviewImage(next);
@@ -356,12 +395,12 @@ export default function ReaderView({
 
   const handleDeleteCard = useCallback((cardId: string) => {
     const target = cardsRef.current.find((card) => card.id === cardId);
-    if (target) releaseCardImages([target]);
+    if (target) deleteCardImages([target]);
 
     setCards((prev) => prev.filter((c) => c.id !== cardId));
     setEdges((prev) => prev.filter((e) => e.source !== cardId && e.target !== cardId));
     setAnchors((prev) => prev.filter((a) => a.targetNodeId !== cardId));
-  }, [releaseCardImages]);
+  }, [deleteCardImages]);
 
   const handleDeleteAnchor = useCallback((anchorId: string) => {
     setAnchors((prev) => prev.filter((a) => a.id !== anchorId));
@@ -486,17 +525,19 @@ export default function ReaderView({
     [findNonOverlappingY]
   );
 
-  // Structured Symmetric Auto-Layout: aligns cards into neat columns and centers child groups around their parent
+  // Structured Symmetric Auto-Layout: aligns visible cards into neat columns and centers child groups around their parent
   const handleAutoLayoutCards = useCallback(() => {
     const canvasEl = canvasRef.current;
     const bookEl = bookStickyRef.current;
-    if (!canvasEl || !bookEl || cards.length === 0) return;
+    if (!canvasEl || !bookEl || visibleCards.length === 0) return;
 
     const canvasRect = canvasEl.getBoundingClientRect();
+    const layoutCards = visibleCards;
+    const layoutCardIds = new Set(layoutCards.map((c) => c.id));
 
-    // 1. Measure actual DOM height of every card
+    // 1. Measure actual DOM height of every visible card
     const cardHeightMap = new Map<string, number>();
-    for (const c of cards) {
+    for (const c of layoutCards) {
       const el = canvasEl.querySelector<HTMLElement>(`[data-card-id="${c.id}"]`);
       cardHeightMap.set(c.id, el ? el.getBoundingClientRect().height : 64);
     }
@@ -504,7 +545,7 @@ export default function ReaderView({
     // 2. Measure true book anchor Y (in canvas local coordinate space) for anchored cards
     const anchorTargetYMap = new Map<string, number>();
     for (const anchor of anchors) {
-      if (!anchor.targetNodeId) continue;
+      if (!anchor.targetNodeId || !layoutCardIds.has(anchor.targetNodeId)) continue;
       const anchorEl = bookEl.querySelector<HTMLElement>(
         `[data-anchor-id="${anchor.id}"]`
       );
@@ -517,10 +558,11 @@ export default function ReaderView({
       }
     }
 
-    // 3. Build parent -> children graph from edges and assign column index (0, 1, 2, ...)
+    // 3. Build parent -> children graph from visible edges and assign column index (0, 1, 2, ...)
     const incomingMap = new Map<string, string[]>();
     const outgoingMap = new Map<string, string[]>();
     for (const edge of edges) {
+      if (!layoutCardIds.has(edge.source) || !layoutCardIds.has(edge.target)) continue;
       incomingMap.set(edge.target, [...(incomingMap.get(edge.target) ?? []), edge.source]);
       outgoingMap.set(edge.source, [...(outgoingMap.get(edge.source) ?? []), edge.target]);
     }
@@ -528,7 +570,7 @@ export default function ReaderView({
     const colMap = new Map<string, number>();
     const visited = new Set<string>();
 
-    const roots = cards.filter(
+    const roots = layoutCards.filter(
       (c) => Boolean(c.anchorId) || (incomingMap.get(c.id)?.length ?? 0) === 0
     );
 
@@ -552,22 +594,21 @@ export default function ReaderView({
       }
     }
 
-    for (const c of cards) {
+    for (const c of layoutCards) {
       if (!colMap.has(c.id)) colMap.set(c.id, 0);
     }
 
-    // 4. Group cards by column index (0, 1, 2, ...)
+    // 4. Group visible cards by column index (0, 1, 2, ...)
     const maxCol = Math.max(0, ...Array.from(colMap.values()));
     const newPosMap = new Map<string, { x: number; y: number }>();
 
-    // Anchor the first column to the currently visible left edge so laid-out
-    // cards never end up underneath the sticky book column.
-    const COL_START_X = (unifiedScrollRef.current?.scrollLeft ?? 0) + 44;
+    // 第一列固定贴近书页右侧边缘，不再叠加 scrollLeft，避免画布平移状态下点整理把卡片永久推向右方。
+    const COL_START_X = 44;
     const COL_STEP_X = 292;
     const ROW_GAP_Y = 18;
 
     for (let col = 0; col <= maxCol; col++) {
-      const colCards = cards.filter((c) => (colMap.get(c.id) ?? 0) === col);
+      const colCards = layoutCards.filter((c) => (colMap.get(c.id) ?? 0) === col);
       const desiredYMap = new Map<string, number>();
 
       if (col === 0) {
@@ -635,13 +676,18 @@ export default function ReaderView({
       }
     }
 
-    setCards((prev) =>
-      prev.map((c) => {
+    setCards((prev) => {
+      let changed = false;
+      const next = prev.map((c) => {
         const pos = newPosMap.get(c.id);
-        return pos ? { ...c, x: pos.x, y: pos.y } : c;
-      })
-    );
-  }, [cards, anchors, edges]);
+        if (!pos) return c;
+        if (Math.abs(c.x - pos.x) <= 0.5 && Math.abs(c.y - pos.y) <= 0.5) return c;
+        changed = true;
+        return { ...c, x: pos.x, y: pos.y };
+      });
+      return changed ? next : prev;
+    });
+  }, [visibleCards, anchors, edges]);
 
   // 一键折叠 / 展开之后，等新的卡片高度落到 DOM 上，再整理一次布局，
   // 省得用户还得手动点一次「自动排列」。
@@ -915,7 +961,7 @@ export default function ReaderView({
 
     const disposeCurrentBook = () => {
       closePreviewImage();
-      releaseCardImages(cardsRef.current);
+      revokeCardImageUrls(cardsRef.current);
       setEpubImageLoader(null);
       setPdfSource(null);
     };
@@ -959,6 +1005,7 @@ export default function ReaderView({
         setAnchors(saved?.anchors ?? []);
         setCards(restoredCards);
         setEdges(saved?.edges ?? []);
+        pendingInitialAlignRef.current = restoredCards.some((c) => Boolean(c.anchorId));
         setActiveAnchorId(null);
         setSelectedCardId(null);
         setLoadError(null);
@@ -981,68 +1028,203 @@ export default function ReaderView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book]);
 
-  // Restore the reading position once layout has settled.
+  const paragraphIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    paragraphs.forEach((p, idx) => map.set(p.id, idx));
+    return map;
+  }, [paragraphs]);
+
+  const applySavedLocator = useCallback((target: SavedLocator | null) => {
+    const el = unifiedScrollRef.current;
+    if (!el) return;
+    if (!target) {
+      el.scrollLeft = 0;
+      return;
+    }
+    const bookEl = bookStickyRef.current;
+    let positionedByAnchor = false;
+    if (bookEl && target.paragraphId) {
+      const node = bookEl.querySelector<HTMLElement>(
+        `[data-paragraph-id="${target.paragraphId}"]`
+      );
+      if (node) {
+        const offset =
+          node.getBoundingClientRect().top - el.getBoundingClientRect().top;
+        el.scrollTop = Math.max(0, el.scrollTop + offset - (target.offsetY ?? 0));
+        positionedByAnchor = true;
+      }
+    } else if (bookEl && target.pdfPage) {
+      const pageNode = bookEl.querySelector<HTMLElement>(
+        `[data-pdf-page="${target.pdfPage}"]`
+      );
+      if (pageNode) {
+        const offset =
+          pageNode.getBoundingClientRect().top - el.getBoundingClientRect().top;
+        el.scrollTop = Math.max(0, el.scrollTop + offset - (target.offsetY ?? 0));
+        positionedByAnchor = true;
+      }
+    }
+    if (!positionedByAnchor) {
+      el.scrollTop = target.top;
+    }
+    const minCardX = cardsRef.current.reduce(
+      (min, card) => Math.min(min, card.x),
+      Number.POSITIVE_INFINITY
+    );
+    const maxLeft = Number.isFinite(minCardX)
+      ? Math.max(0, minCardX - 16)
+      : target.left;
+    el.scrollLeft = Math.min(target.left, maxLeft);
+  }, []);
+
+  const realignDriftedCardsIfNeeded = useCallback(() => {
+    const canvasEl = canvasRef.current;
+    const bookEl = bookStickyRef.current;
+    if (!canvasEl || !bookEl || visibleCards.length === 0) return;
+    const canvasRect = canvasEl.getBoundingClientRect();
+    let maxDrift = 0;
+    for (const anchor of anchors) {
+      if (!anchor.targetNodeId) continue;
+      const card = visibleCards.find((c) => c.id === anchor.targetNodeId);
+      if (!card) continue;
+      const anchorEl = bookEl.querySelector<HTMLElement>(
+        `[data-anchor-id="${anchor.id}"]`
+      );
+      if (!anchorEl) continue;
+      const rect = anchorEl.getBoundingClientRect();
+      if (rect.height <= 0) continue;
+      const localY = Math.max(20, rect.top - canvasRect.top - 10);
+      maxDrift = Math.max(maxDrift, Math.abs(card.y - localY));
+    }
+    if (maxDrift > 36) {
+      handleAutoLayoutCards();
+    }
+  }, [anchors, visibleCards, handleAutoLayoutCards]);
+
+  // EPUB 懒加载图片撑开书页高度后，及时重绘引线并在需要时自动重新对齐锚点卡片。
+  const handleEpubImageLoaded = useCallback(() => {
+    recomputeCardEdges();
+    if (imageAlignTimerRef.current) window.clearTimeout(imageAlignTimerRef.current);
+    imageAlignTimerRef.current = window.setTimeout(() => {
+      imageAlignTimerRef.current = null;
+      if (!userInteractedAfterOpenRef.current && activeRestoreTargetRef.current) {
+        applySavedLocator(activeRestoreTargetRef.current);
+      }
+      realignDriftedCardsIfNeeded();
+      recomputeCardEdges();
+    }, 150);
+  }, [applySavedLocator, realignDriftedCardsIfNeeded, recomputeCardEdges]);
+
+  useEffect(() => {
+    return () => {
+      if (imageAlignTimerRef.current) window.clearTimeout(imageAlignTimerRef.current);
+    };
+  }, []);
+
+  // Restore the reading position once layout has settled, and auto-align drifted cards on open.
   useEffect(() => {
     if (!docReady) return;
     const target = restoreScrollRef.current;
     restoreScrollRef.current = null;
+    activeRestoreTargetRef.current = target;
+    userInteractedAfterOpenRef.current = false;
+    setReadingProgress(book.progress ?? 0);
     const el = unifiedScrollRef.current;
     if (!el) return;
 
+    const markUserInteracted = () => {
+      userInteractedAfterOpenRef.current = true;
+      activeRestoreTargetRef.current = null;
+    };
+    el.addEventListener('wheel', markUserInteracted, { passive: true });
+    el.addEventListener('pointerdown', markUserInteracted, { passive: true });
+
     const apply = () => {
-      if (target) {
-        el.scrollTop = target.top;
-        // Never restore so far right that the first card column is hidden
-        // under the sticky book column.
-        const minCardX = cardsRef.current.reduce(
-          (min, card) => Math.min(min, card.x),
-          Number.POSITIVE_INFINITY
-        );
-        const maxLeft = Number.isFinite(minCardX)
-          ? Math.max(0, minCardX - 16)
-          : target.left;
-        el.scrollLeft = Math.min(target.left, maxLeft);
-      } else {
-        el.scrollLeft = 0;
+      if (userInteractedAfterOpenRef.current) return;
+      applySavedLocator(target);
+      if (pendingInitialAlignRef.current) {
+        pendingInitialAlignRef.current = false;
+        realignDriftedCardsIfNeeded();
       }
       bumpSync();
     };
-    const first = window.setTimeout(apply, 120);
-    const second = window.setTimeout(apply, 600);
-    return () => {
-      window.clearTimeout(first);
-      window.clearTimeout(second);
-    };
-  }, [docReady, bumpSync]);
 
-  // Persist annotations (debounced so typing stays smooth).
-  useEffect(() => {
-    if (!hydratedRef.current) return;
-    const timer = window.setTimeout(() => {
-      void saveAnnotations(book.id, {
-        anchors,
-        cards: cards.map((card) => ({
-          ...card,
-          images: card.images?.map((image) => ({
-            id: image.id,
-            thumbUrl: '',
-            width: image.width,
-            height: image.height,
-          })),
+    const raf = requestAnimationFrame(apply);
+    const settle = window.setTimeout(apply, 160);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(settle);
+      el.removeEventListener('wheel', markUserInteracted);
+      el.removeEventListener('pointerdown', markUserInteracted);
+    };
+  }, [docReady, book.progress, applySavedLocator, realignDriftedCardsIfNeeded, bumpSync]);
+
+  const flushAnnotationsNow = useCallback(() => {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    if (!dirtyAnnotationsRef.current) return;
+    dirtyAnnotationsRef.current = false;
+    const snapshot = latestAnnotationsRef.current;
+    void saveAnnotations(snapshot.bookId, {
+      anchors: snapshot.anchors,
+      cards: snapshot.cards.map((card) => ({
+        ...card,
+        images: card.images?.map((image) => ({
+          id: image.id,
+          thumbUrl: '',
+          width: image.width,
+          height: image.height,
+          ...(image.filePath ? { filePath: image.filePath } : {}),
+          ...(image.thumbPath ? { thumbPath: image.thumbPath } : {}),
         })),
-        edges,
-      }).catch((err) => console.warn('保存批注失败', err));
-    }, 600);
-    return () => window.clearTimeout(timer);
-  }, [book.id, anchors, cards, edges]);
+      })),
+      edges: snapshot.edges,
+    }).catch((err) => console.warn('保存批注失败', err));
+  }, []);
+
+  // Persist annotations (debounced so typing stays smooth, flushed on unmount/close).
+  useEffect(() => {
+    latestAnnotationsRef.current = { bookId: book.id, anchors, cards, edges };
+    if (!hydratedRef.current) return;
+    dirtyAnnotationsRef.current = true;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(flushAnnotationsNow, 600);
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [book.id, anchors, cards, edges, flushAnnotationsNow]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => flushAnnotationsNow();
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      flushAnnotationsNow();
+    };
+  }, [flushAnnotationsNow]);
 
   useEffect(() => {
     if (!showToc) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setShowToc(false);
     };
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('.toc-panel')) return;
+      if (target.closest('[data-toc-toggle="true"]')) return;
+      setShowToc(false);
+    };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('mousedown', onMouseDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('mousedown', onMouseDown);
+    };
   }, [showToc]);
 
   const handleTocJump = useCallback((entry: TocEntry) => {
@@ -1073,6 +1255,64 @@ export default function ReaderView({
     bookWidthRef.current = settings.bookWidth;
   }, [settings.bookWidth]);
 
+  const computeReadingSnapshot = useCallback((): {
+    progress: number;
+    locator: string;
+  } | null => {
+    const el = unifiedScrollRef.current;
+    if (!el) return null;
+    const scrollerRect = el.getBoundingClientRect();
+    const max = el.scrollHeight - el.clientHeight;
+    const fallbackRatio = max > 0 ? Math.min(1, Math.max(0, el.scrollTop / max)) : 0;
+    const saved: SavedLocator = {
+      top: Math.round(el.scrollTop),
+      left: Math.round(el.scrollLeft),
+    };
+    let ratio = fallbackRatio;
+
+    const bookEl = bookStickyRef.current;
+    if (bookEl && docFormat === 'epub') {
+      const nodes = bookEl.querySelectorAll<HTMLElement>('[data-paragraph-id]');
+      for (let i = 0; i < nodes.length; i += 1) {
+        const rect = nodes[i].getBoundingClientRect();
+        if (rect.bottom > scrollerRect.top + 8) {
+          const pid = nodes[i].dataset.paragraphId;
+          if (pid) {
+            saved.paragraphId = pid;
+            saved.offsetY = Math.round(rect.top - scrollerRect.top);
+            const idx = paragraphIndexMap.get(pid);
+            if (idx !== undefined && paragraphs.length > 1) {
+              ratio = max > 0 && el.scrollTop >= max - 4
+                ? 1
+                : Math.min(1, Math.max(0, idx / (paragraphs.length - 1)));
+            }
+          }
+          break;
+        }
+      }
+    } else if (bookEl && docFormat === 'pdf') {
+      const pages = bookEl.querySelectorAll<HTMLElement>('[data-pdf-page]');
+      for (let i = 0; i < pages.length; i += 1) {
+        const rect = pages[i].getBoundingClientRect();
+        if (rect.bottom > scrollerRect.top + 8) {
+          const pageNum = Number(pages[i].dataset.pdfPage);
+          if (Number.isFinite(pageNum) && pageNum > 0) {
+            saved.pdfPage = pageNum;
+            saved.offsetY = Math.round(rect.top - scrollerRect.top);
+            if (pages.length > 1) {
+              ratio = max > 0 && el.scrollTop >= max - 4
+                ? 1
+                : Math.min(1, Math.max(0, (pageNum - 1) / (pages.length - 1)));
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    return { progress: ratio, locator: JSON.stringify(saved) };
+  }, [docFormat, paragraphIndexMap, paragraphs.length]);
+
   const handleScroll = useCallback(() => {
     // 滚动后操作条会错位，直接收起。
     setAnchorActions((prev) => (prev ? null : prev));
@@ -1081,16 +1321,13 @@ export default function ReaderView({
     if (!el) return;
     if (progressTimerRef.current) window.clearTimeout(progressTimerRef.current);
     progressTimerRef.current = window.setTimeout(() => {
-      const max = el.scrollHeight - el.clientHeight;
-      const ratio = max > 0 ? Math.min(1, Math.max(0, el.scrollTop / max)) : 0;
-      const locator = JSON.stringify({
-        top: Math.round(el.scrollTop),
-        left: Math.round(el.scrollLeft),
-      });
-      lastProgressRef.current = { progress: ratio, locator };
-      onProgress(book.id, ratio, locator);
-    }, 500);
-  }, [book.id, bumpSync, onProgress]);
+      const snap = computeReadingSnapshot();
+      if (!snap) return;
+      setReadingProgress(snap.progress);
+      lastProgressRef.current = snap;
+      onProgress(book.id, snap.progress, snap.locator);
+    }, 350);
+  }, [book.id, bumpSync, computeReadingSnapshot, onProgress]);
 
   // Flush the pending reading position when leaving the book.
   useEffect(() => {
@@ -1139,7 +1376,7 @@ export default function ReaderView({
 
       const newCard: AnnotationCardItem = {
         id: cardId,
-        x: 44,
+        x: cardX,
         y: candidateY,
         kind,
         badgeNumber,
@@ -1377,6 +1614,7 @@ export default function ReaderView({
           {toc.length > 0 && (
             <button
               type="button"
+              data-toc-toggle="true"
               className={`topbar__icon-btn ${showToc ? 'is-active' : ''}`}
               title="目录"
               onClick={() => setShowToc((visible) => !visible)}
@@ -1390,7 +1628,12 @@ export default function ReaderView({
             </span>
             <span className="topbar__meta" data-tauri-drag-region>
               {docFormat.toUpperCase()}
-              {!docReady && (
+              {docReady ? (
+                <>
+                  <span className="topbar__dot">·</span>
+                  <span title="当前阅读进度">{Math.round(readingProgress * 100)}%</span>
+                </>
+              ) : (
                 <>
                   <span className="topbar__dot">·</span>
                   <Loader2 size={11} className="topbar__spinner" />
@@ -1582,6 +1825,7 @@ export default function ReaderView({
                   isDraggingWireToBook={Boolean(draggingWire && draggingWire.mode === 'to-book')}
                   scrollContainerRef={unifiedScrollRef}
                   epubImageLoader={epubImageLoader}
+                  onImageLoaded={handleEpubImageLoaded}
                   onScroll={handleScroll}
                   onCreateAnnotation={handleCreateTextAnnotation}
                   onClickAnchor={handleClickBookAnchor}

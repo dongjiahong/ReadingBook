@@ -31,6 +31,10 @@ export interface CardImage {
   thumbUrl: string;
   width: number;
   height: number;
+  /** 桌面端原图相对路径（位于 $APPDATA/images/）。 */
+  filePath?: string;
+  /** 桌面端缩略图相对路径（位于 $APPDATA/images/）。 */
+  thumbPath?: string;
 }
 
 export interface AnnotationCardItem {

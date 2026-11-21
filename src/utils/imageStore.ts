@@ -1,8 +1,20 @@
+import { convertFileSrc } from '@tauri-apps/api/core';
+import { appDataDir, join } from '@tauri-apps/api/path';
+import {
+  BaseDirectory,
+  exists,
+  mkdir,
+  readDir,
+  remove,
+  writeFile,
+} from '@tauri-apps/plugin-fs';
+import { isDesktop } from '../services/library';
 import type { AnnotationCardItem, CardImage } from '../types';
 
 const DB_NAME = 'readingbook-images';
 const DB_VERSION = 1;
 const STORE_NAME = 'images';
+const IMAGES_DIR = 'images';
 const THUMB_MAX_EDGE = 480;
 const THUMB_TYPE = 'image/webp';
 const THUMB_QUALITY = 0.84;
@@ -20,6 +32,121 @@ let dbPromise: Promise<IDBDatabase | null> | null = null;
 let useMemoryFallback = false;
 const memoryImages = new Map<string, StoredImage>();
 const thumbUrls = new Map<string, string>();
+let appDataDirPromise: Promise<string> | null = null;
+let imagesDirReadyPromise: Promise<void> | null = null;
+
+function getAppDataDir(): Promise<string> {
+  if (appDataDirPromise) return appDataDirPromise;
+  const pending = appDataDir().catch((err: unknown) => {
+    appDataDirPromise = null;
+    throw err;
+  });
+  appDataDirPromise = pending;
+  return pending;
+}
+
+function ensureImagesDir(): Promise<void> {
+  if (imagesDirReadyPromise) return imagesDirReadyPromise;
+  const pending = mkdir(IMAGES_DIR, {
+    baseDir: BaseDirectory.AppData,
+    recursive: true,
+  }).catch((err: unknown) => {
+    imagesDirReadyPromise = null;
+    throw err;
+  });
+  imagesDirReadyPromise = pending;
+  return pending;
+}
+
+function extFromMime(mime: string | undefined, fallback = 'png'): string {
+  const normalized = (mime ?? '').toLowerCase().split(';')[0].trim();
+  switch (normalized) {
+    case 'image/png':
+      return 'png';
+    case 'image/jpeg':
+    case 'image/jpg':
+      return 'jpg';
+    case 'image/webp':
+      return 'webp';
+    case 'image/gif':
+      return 'gif';
+    case 'image/svg+xml':
+      return 'svg';
+    case 'image/bmp':
+      return 'bmp';
+    case 'image/avif':
+      return 'avif';
+    default:
+      return fallback;
+  }
+}
+
+async function toDesktopAssetUrl(relativePath: string): Promise<string> {
+  const abs = await join(await getAppDataDir(), relativePath);
+  return convertFileSrc(abs);
+}
+
+async function writeImageToDisk(
+  id: string,
+  full: Blob,
+  thumb: Blob
+): Promise<{ filePath: string; thumbPath: string }> {
+  await ensureImagesDir();
+  const fullExt = extFromMime(full.type, 'png');
+  const thumbExt = extFromMime(thumb.type, 'png');
+  const filePath = `${IMAGES_DIR}/${id}.${fullExt}`;
+  const thumbPath = `${IMAGES_DIR}/${id}.thumb.${thumbExt}`;
+
+  const [fullBytes, thumbBytes] = await Promise.all([
+    full.arrayBuffer(),
+    thumb.arrayBuffer(),
+  ]);
+
+  await Promise.all([
+    writeFile(filePath, new Uint8Array(fullBytes), {
+      baseDir: BaseDirectory.AppData,
+    }),
+    writeFile(thumbPath, new Uint8Array(thumbBytes), {
+      baseDir: BaseDirectory.AppData,
+    }),
+  ]);
+
+  return { filePath, thumbPath };
+}
+
+async function findDiskImageFiles(
+  id: string,
+  entries?: string[]
+): Promise<{ filePath?: string; thumbPath?: string }> {
+  let names: string[];
+  if (entries) {
+    names = entries;
+  } else {
+    try {
+      await ensureImagesDir();
+      const dir = await readDir(IMAGES_DIR, { baseDir: BaseDirectory.AppData });
+      names = dir
+        .map((entry) => entry.name)
+        .filter((n): n is string => typeof n === 'string' && n.length > 0);
+    } catch {
+      return {};
+    }
+  }
+
+  let filePath: string | undefined;
+  let thumbPath: string | undefined;
+  const thumbPrefix = `${id}.thumb.`;
+  const fullPrefix = `${id}.`;
+
+  for (const name of names) {
+    if (name.startsWith(thumbPrefix)) {
+      thumbPath = `${IMAGES_DIR}/${name}`;
+    } else if (name.startsWith(fullPrefix)) {
+      filePath = `${IMAGES_DIR}/${name}`;
+    }
+  }
+  return { filePath, thumbPath };
+}
 
 function openDb(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
@@ -57,7 +184,7 @@ function openDb(): Promise<IDBDatabase | null> {
   return dbPromise;
 }
 
-async function putImage(record: StoredImage): Promise<void> {
+async function putImageInIdb(record: StoredImage): Promise<void> {
   const db = await openDb();
   if (!db || useMemoryFallback) {
     memoryImages.set(record.id, record);
@@ -73,7 +200,7 @@ async function putImage(record: StoredImage): Promise<void> {
   });
 }
 
-async function getImage(id: string): Promise<StoredImage | undefined> {
+async function getImageFromIdb(id: string): Promise<StoredImage | undefined> {
   const db = await openDb();
   if (!db || useMemoryFallback) {
     return memoryImages.get(id);
@@ -87,7 +214,7 @@ async function getImage(id: string): Promise<StoredImage | undefined> {
   });
 }
 
-async function deleteImage(id: string): Promise<void> {
+async function deleteImageFromIdb(id: string): Promise<void> {
   const db = await openDb();
   if (!db || useMemoryFallback) {
     memoryImages.delete(id);
@@ -148,29 +275,41 @@ async function makeThumbnail(file: Blob): Promise<{
   }
 }
 
+export function revokeObjectUrlIfBlob(url: string | null | undefined): void {
+  if (url && url.startsWith('blob:')) {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export async function importImageFiles(files: FileList | File[]): Promise<CardImage[]> {
   const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'));
   const imported: CardImage[] = [];
+  const desktop = isDesktop();
 
   // Decode one image at a time so a multi-image paste does not spike memory.
   for (const file of imageFiles) {
     try {
       const { blob: thumb, width, height } = await makeThumbnail(file);
       const id = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const record: StoredImage = {
-        id,
-        full: file,
-        thumb,
-        width,
-        height,
-        createdAt: Date.now(),
-      };
 
-      await putImage(record);
-
-      const thumbUrl = URL.createObjectURL(thumb);
-      thumbUrls.set(id, thumbUrl);
-      imported.push({ id, thumbUrl, width, height });
+      if (desktop) {
+        const { filePath, thumbPath } = await writeImageToDisk(id, file, thumb);
+        const thumbUrl = await toDesktopAssetUrl(thumbPath);
+        imported.push({ id, thumbUrl, width, height, filePath, thumbPath });
+      } else {
+        const record: StoredImage = {
+          id,
+          full: file,
+          thumb,
+          width,
+          height,
+          createdAt: Date.now(),
+        };
+        await putImageInIdb(record);
+        const thumbUrl = URL.createObjectURL(thumb);
+        thumbUrls.set(id, thumbUrl);
+        imported.push({ id, thumbUrl, width, height });
+      }
     } catch (err) {
       console.warn('图片导入失败', err);
     }
@@ -179,9 +318,28 @@ export async function importImageFiles(files: FileList | File[]): Promise<CardIm
   return imported;
 }
 
-export async function createFullImageUrl(id: string): Promise<string | null> {
+export async function createFullImageUrl(
+  image: Pick<CardImage, 'id' | 'filePath'>
+): Promise<string | null> {
   try {
-    const record = await getImage(id);
+    if (isDesktop()) {
+      let fullPath = image.filePath;
+      if (fullPath) {
+        const ok = await exists(fullPath, { baseDir: BaseDirectory.AppData }).catch(
+          () => false
+        );
+        if (!ok) fullPath = undefined;
+      }
+      if (!fullPath) {
+        const found = await findDiskImageFiles(image.id);
+        fullPath = found.filePath ?? found.thumbPath;
+      }
+      if (fullPath) {
+        return await toDesktopAssetUrl(fullPath);
+      }
+    }
+
+    const record = await getImageFromIdb(image.id);
     return record ? URL.createObjectURL(record.full) : null;
   } catch (err) {
     console.warn('读取原图失败', err);
@@ -189,32 +347,130 @@ export async function createFullImageUrl(id: string): Promise<string | null> {
   }
 }
 
-export function releaseImage(id: string): void {
+/**
+ * 仅释放内存中的 ObjectURL，不会删除磁盘或 IndexedDB 中持久化的图片。
+ * 用于切换书籍、返回书架或组件卸载时的内存清理。
+ */
+export function revokeImageUrl(id: string): void {
   const url = thumbUrls.get(id);
   if (url) {
-    URL.revokeObjectURL(url);
+    revokeObjectUrlIfBlob(url);
     thumbUrls.delete(id);
   }
-  void deleteImage(id).catch(() => {});
 }
 
 /**
- * Cards persisted in SQLite keep only image ids, so object URLs are rebuilt
- * from IndexedDB each time a book is reopened. Missing records are dropped.
+ * 永久删除持久化存储的图片（磁盘文件与旧版 IndexedDB 记录），
+ * 仅在用户主动移除图片、删除卡片或删除书籍时调用。
+ */
+export async function deleteStoredImage(
+  image: Pick<CardImage, 'id' | 'filePath' | 'thumbPath'>
+): Promise<void> {
+  revokeImageUrl(image.id);
+
+  if (isDesktop()) {
+    const targets = new Set<string>();
+    if (image.filePath) targets.add(image.filePath);
+    if (image.thumbPath) targets.add(image.thumbPath);
+    if (targets.size === 0) {
+      const found = await findDiskImageFiles(image.id);
+      if (found.filePath) targets.add(found.filePath);
+      if (found.thumbPath) targets.add(found.thumbPath);
+    }
+    await Promise.all(
+      Array.from(targets).map((path) =>
+        remove(path, { baseDir: BaseDirectory.AppData }).catch(() => {})
+      )
+    );
+  }
+
+  await deleteImageFromIdb(image.id).catch(() => {});
+}
+
+/**
+ * Rebuilds display URLs for persisted card images when opening a book.
+ * On desktop, prefers `$APPDATA/images/` on disk and automatically migrates
+ * any legacy IndexedDB records into `$APPDATA/images/`.
  */
 export async function restoreThumbUrls(
   cards: AnnotationCardItem[]
 ): Promise<AnnotationCardItem[]> {
+  const desktop = isDesktop();
+  let diskEntries: string[] | undefined;
+
+  if (desktop) {
+    try {
+      await ensureImagesDir();
+      const dir = await readDir(IMAGES_DIR, { baseDir: BaseDirectory.AppData });
+      diskEntries = dir
+        .map((entry) => entry.name)
+        .filter((name): name is string => Boolean(name));
+    } catch {
+      diskEntries = [];
+    }
+  }
+
   const restored: AnnotationCardItem[] = [];
   for (const card of cards) {
     if (!card.images?.length) {
       restored.push(card);
       continue;
     }
+
     const images: CardImage[] = [];
     for (const image of card.images) {
       try {
-        const record = await getImage(image.id);
+        if (desktop) {
+          let filePath = image.filePath;
+          let thumbPath = image.thumbPath;
+
+          if (thumbPath && !(await exists(thumbPath, { baseDir: BaseDirectory.AppData }).catch(() => false))) {
+            thumbPath = undefined;
+          }
+          if (filePath && !(await exists(filePath, { baseDir: BaseDirectory.AppData }).catch(() => false))) {
+            filePath = undefined;
+          }
+
+          if (!thumbPath || !filePath) {
+            const found = await findDiskImageFiles(image.id, diskEntries);
+            filePath = filePath ?? found.filePath;
+            thumbPath = thumbPath ?? found.thumbPath;
+          }
+
+          if (thumbPath || filePath) {
+            const displayPath = thumbPath ?? filePath!;
+            images.push({
+              id: image.id,
+              thumbUrl: await toDesktopAssetUrl(displayPath),
+              width: image.width,
+              height: image.height,
+              filePath: filePath ?? displayPath,
+              thumbPath: displayPath,
+            });
+            continue;
+          }
+
+          // 兼容旧版：尝试从 IndexedDB 迁移到 $APPDATA/images/
+          const legacy = await getImageFromIdb(image.id).catch(() => undefined);
+          if (legacy) {
+            const migrated = await writeImageToDisk(image.id, legacy.full, legacy.thumb);
+            const thumbUrl = await toDesktopAssetUrl(migrated.thumbPath);
+            images.push({
+              id: image.id,
+              thumbUrl,
+              width: legacy.width,
+              height: legacy.height,
+              filePath: migrated.filePath,
+              thumbPath: migrated.thumbPath,
+            });
+            continue;
+          }
+
+          // 未找到图片文件时跳过，避免渲染损坏占位图
+          continue;
+        }
+
+        const record = await getImageFromIdb(image.id);
         if (!record) continue;
         let url = thumbUrls.get(image.id);
         if (!url) {
@@ -227,12 +483,11 @@ export async function restoreThumbUrls(
           width: record.width,
           height: record.height,
         });
-      } catch {
-        // Skip images that can no longer be read.
+      } catch (err) {
+        console.warn('恢复卡片图片失败', image.id, err);
       }
     }
     restored.push({ ...card, images });
   }
   return restored;
 }
-

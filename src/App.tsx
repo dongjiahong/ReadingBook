@@ -17,7 +17,7 @@ import {
   markBookOpenedNow,
 } from './services/library';
 import type { BookRecord, ReaderSettings } from './types';
-import { releaseImage } from './utils/imageStore';
+import { deleteStoredImage } from './utils/imageStore';
 
 const DEFAULT_SETTINGS: ReaderSettings = {
   theme: 'light',
@@ -113,7 +113,7 @@ export default function App() {
     try {
       const saved = await loadAnnotations(book.id);
       for (const card of saved?.cards ?? []) {
-        for (const image of card.images ?? []) releaseImage(image.id);
+        for (const image of card.images ?? []) void deleteStoredImage(image);
       }
       await deleteBookFromDisk(book);
       await deleteBookRecord(book.id);
