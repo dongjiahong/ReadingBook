@@ -3,20 +3,26 @@ import {
   ArrowLeft,
   ChevronsDownUp,
   ChevronsUpDown,
+  Download,
   GitCommitHorizontal,
   LayoutGrid,
   ListTree,
   Loader2,
   PlusCircle,
+  Redo2,
   RotateCcw,
+  Search,
   Settings,
   Trash2,
+  Undo2,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { AnnotationCard } from './components/AnnotationCard';
 import { BookPane } from './components/BookPane';
+import { ImageAnnotatorModal } from './components/ImageAnnotatorModal';
+import { SearchModal, type SearchResultAction } from './components/SearchModal';
 import {
   BookToCanvasBridge,
   type MidLineRoutingMode,
@@ -39,11 +45,18 @@ import type {
 import { invoke } from '@tauri-apps/api/core';
 import { loadAnnotations, saveAnnotations } from './services/db';
 import { EpubImageLoader, parseEpubFile } from './utils/epubLoader';
+import {
+  loadEpubImageDims,
+  saveEpubImageDims,
+  type ImageDimsMap,
+} from './utils/epubDimsCache';
 import { computeCardFoldState } from './utils/cardTree';
 import { nearestFreeY, type PlacementBox } from './utils/cardPlacement';
+import { exportBookAnnotationsToMarkdown } from './utils/exportMarkdown';
 import {
   createFullImageUrl,
   deleteStoredImage,
+  importImageFiles,
   restoreThumbUrls,
   revokeImageUrl,
   revokeObjectUrlIfBlob,
@@ -86,6 +99,7 @@ interface ReaderViewProps {
   book: BookRecord;
   settings: ReaderSettings;
   onBack: () => void;
+  onSwitchBook?: (bookId: string) => void;
   onOpenSettings: () => void;
   onSettingsChange: (patch: Partial<ReaderSettings>) => void;
   onProgress: (bookId: string, progress: number, locator: string) => void;
@@ -95,6 +109,7 @@ export default function ReaderView({
   book,
   settings,
   onBack,
+  onSwitchBook,
   onOpenSettings,
   onSettingsChange,
   onProgress,
@@ -112,6 +127,16 @@ export default function ReaderView({
   const activeRestoreTargetRef = useRef<SavedLocator | null>(null);
   const userInteractedAfterOpenRef = useRef(false);
   const imageAlignTimerRef = useRef<number | null>(null);
+  const epubDimsRef = useRef<ImageDimsMap>({});
+  const epubDimsDirtyRef = useRef(false);
+  const epubDimsTimerRef = useRef<number | null>(null);
+  const undoStackRef = useRef<
+    { anchors: BookAnchor[]; cards: AnnotationCardItem[]; edges: CardEdge[] }[]
+  >([]);
+  const redoStackRef = useRef<
+    { anchors: BookAnchor[]; cards: AnnotationCardItem[]; edges: CardEdge[] }[]
+  >([]);
+  const pendingDeleteImagesRef = useRef<Map<string, CardImage>>(new Map());
   const pendingInitialAlignRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
   const dirtyAnnotationsRef = useRef(false);
@@ -122,11 +147,21 @@ export default function ReaderView({
     edges: CardEdge[];
   }>({ bookId: book.id, anchors: [], cards: [], edges: [] });
 
+  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
+
+  const cardScale = Math.min(1.2, Math.max(0.5, settings.cardScale ?? 1));
+  const [annotatingImage, setAnnotatingImage] = useState<{
+    cardId: string;
+    image: CardImage;
+    url: string;
+  } | null>(null);
   const [bookWidth, setBookWidth] = useState<number>(settings.bookWidth);
   const [isResizing, setIsResizing] = useState(false);
   const [docReady, setDocReady] = useState(false);
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [showToc, setShowToc] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [readingProgress, setReadingProgress] = useState<number>(book.progress ?? 0);
 
   const [docFormat, setDocFormat] = useState<DocFormat>('epub');
@@ -237,13 +272,14 @@ export default function ReaderView({
   // Compute dynamic infinite width for the right canvas based on the rightmost card
   const canvasMinWidth = useMemo(() => {
     let maxRight = 720;
+    const scaledSpan = Math.round(360 * cardScale);
     for (const c of visibleCards) {
-      if (c.x + 360 > maxRight) {
-        maxRight = c.x + 360;
+      if (c.x + scaledSpan > maxRight) {
+        maxRight = c.x + scaledSpan;
       }
     }
     return maxRight + 420;
-  }, [visibleCards]);
+  }, [visibleCards, cardScale]);
 
   // Compute dynamic minimum height so cards placed lower than short books are still reachable
   const canvasMinHeight = useMemo(() => {
@@ -301,11 +337,201 @@ export default function ReaderView({
     return () => cancelAnimationFrame(raf);
   }, [cards, edges, recomputeCardEdges]);
 
-  const handleMoveCard = useCallback((cardId: string, nextX: number, nextY: number) => {
-    setCards((prev) =>
-      prev.map((c) => (c.id === cardId ? { ...c, x: nextX, y: nextY } : c))
-    );
+  const syncHistoryFlags = useCallback(() => {
+    setHistoryState({
+      canUndo: undoStackRef.current.length > 0,
+      canRedo: redoStackRef.current.length > 0,
+    });
   }, []);
+
+  const pushUndoSnapshot = useCallback(() => {
+    const snap = latestAnnotationsRef.current;
+    undoStackRef.current.push({
+      anchors: snap.anchors,
+      cards: snap.cards,
+      edges: snap.edges,
+    });
+    if (undoStackRef.current.length > 40) {
+      undoStackRef.current.shift();
+    }
+    redoStackRef.current = [];
+    syncHistoryFlags();
+  }, [syncHistoryFlags]);
+
+  const handleUndo = useCallback(() => {
+    const prev = undoStackRef.current.pop();
+    if (!prev) return;
+    const cur = latestAnnotationsRef.current;
+    redoStackRef.current.push({
+      anchors: cur.anchors,
+      cards: cur.cards,
+      edges: cur.edges,
+    });
+    setAnchors(prev.anchors);
+    setCards(prev.cards);
+    setEdges(prev.edges);
+    syncHistoryFlags();
+  }, [syncHistoryFlags]);
+
+  const handleRedo = useCallback(() => {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    const cur = latestAnnotationsRef.current;
+    undoStackRef.current.push({
+      anchors: cur.anchors,
+      cards: cur.cards,
+      edges: cur.edges,
+    });
+    setAnchors(next.anchors);
+    setCards(next.cards);
+    setEdges(next.edges);
+    syncHistoryFlags();
+  }, [syncHistoryFlags]);
+
+  // 全局快捷键：⌘/Ctrl+K 快速搜索；非输入框焦点时响应 ⌘/Ctrl+Z 撤销与 ⇧⌘Z 重做。
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === 'k') {
+        e.preventDefault();
+        setShowSearch((prev) => !prev);
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'TEXTAREA' ||
+          target.tagName === 'INPUT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (key === 'z' && !e.shiftKey) {
+        if (undoStackRef.current.length > 0) {
+          e.preventDefault();
+          handleUndo();
+        }
+      } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+        if (redoStackRef.current.length > 0) {
+          e.preventDefault();
+          handleRedo();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleUndo, handleRedo]);
+
+  const handleExportMarkdown = useCallback(async () => {
+    try {
+      const ok = await exportBookAnnotationsToMarkdown({
+        bookTitle: bookTitle || book.title,
+        anchors,
+        cards,
+        edges,
+        paragraphs,
+      });
+      if (ok) {
+        setExportNotice('已导出 Markdown');
+        window.setTimeout(() => setExportNotice(null), 2400);
+      }
+    } catch (err) {
+      console.warn('导出 Markdown 失败', err);
+      setExportNotice('导出失败');
+      window.setTimeout(() => setExportNotice(null), 2400);
+    }
+  }, [bookTitle, book.title, anchors, cards, edges, paragraphs]);
+
+  const handleSearchSelect = useCallback(
+    (action: SearchResultAction) => {
+      if (action.kind === 'other-book') {
+        onSwitchBook?.(action.bookId);
+        return;
+      }
+      if (action.kind === 'paragraph') {
+        const target = bookStickyRef.current?.querySelector<HTMLElement>(
+          `[data-paragraph-id="${action.paragraphId}"]`
+        );
+        const scroller = unifiedScrollRef.current;
+        if (target && scroller) {
+          const offset =
+            target.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+          scroller.scrollTo({
+            top: Math.max(0, scroller.scrollTop + offset - 24),
+            left: scroller.scrollLeft,
+            behavior: 'smooth',
+          });
+          bumpSync();
+        }
+        return;
+      }
+      if (action.kind === 'anchor') {
+        setActiveAnchorId(action.anchorId);
+        const target = bookStickyRef.current?.querySelector<HTMLElement>(
+          `[data-anchor-id="${action.anchorId}"]`
+        );
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      // kind === 'card': 展开祖先链并同时聚焦卡片与对应书页锚点
+      const parentsByChild = new Map<string, string[]>();
+      for (const edge of edgesRef.current) {
+        const list = parentsByChild.get(edge.target);
+        if (list) list.push(edge.source);
+        else parentsByChild.set(edge.target, [edge.source]);
+      }
+      const related = new Set<string>([action.cardId]);
+      const stack = [...(parentsByChild.get(action.cardId) ?? [])];
+      while (stack.length > 0) {
+        const id = stack.pop()!;
+        if (related.has(id)) continue;
+        related.add(id);
+        stack.push(...(parentsByChild.get(id) ?? []));
+      }
+      setCards((prev) =>
+        prev.some((c) => related.has(c.id) && c.collapsed)
+          ? prev.map((c) =>
+              related.has(c.id) && c.collapsed ? { ...c, collapsed: false } : c
+            )
+          : prev
+      );
+      setSelectedCardId(action.cardId);
+      if (action.anchorId) setActiveAnchorId(action.anchorId);
+      setRevealCardId(action.cardId);
+    },
+    [bumpSync, onSwitchBook]
+  );
+
+  const getAnchorLocalY = useCallback((anchorId: string): number | null => {
+    const canvasEl = canvasRef.current;
+    const bookEl = bookStickyRef.current;
+    if (!canvasEl || !bookEl) return null;
+    const anchorEl = bookEl.querySelector<HTMLElement>(`[data-anchor-id="${anchorId}"]`);
+    if (!anchorEl) return null;
+    const rect = anchorEl.getBoundingClientRect();
+    if (rect.height <= 0) return null;
+    return Math.max(20, rect.top - canvasEl.getBoundingClientRect().top - 10);
+  }, []);
+
+  const handleMoveCard = useCallback(
+    (cardId: string, nextX: number, nextY: number) => {
+      setCards((prev) =>
+        prev.map((c) => {
+          if (c.id !== cardId) return c;
+          const anchorY = c.anchorId ? getAnchorLocalY(c.anchorId) : null;
+          return {
+            ...c,
+            x: nextX,
+            y: nextY,
+            ...(anchorY !== null ? { anchorOffsetY: Math.round(nextY - anchorY) } : {}),
+          };
+        })
+      );
+    },
+    [getAnchorLocalY]
+  );
 
   const handleChangeBody = useCallback((cardId: string, newBody: string) => {
     setCards((prev) =>
@@ -327,6 +553,8 @@ export default function ReaderView({
 
   const handleRemoveImage = useCallback(
     (cardId: string, image: CardImage) => {
+      pushUndoSnapshot();
+      pendingDeleteImagesRef.current.set(image.id, image);
       setCards((prev) =>
         prev.map((c) =>
           c.id === cardId
@@ -337,12 +565,11 @@ export default function ReaderView({
             : c
         )
       );
-      void deleteStoredImage(image);
       if (previewImageRef.current?.id === image.id) {
         closePreviewImage();
       }
     },
-    [closePreviewImage]
+    [closePreviewImage, pushUndoSnapshot]
   );
 
   const handlePreviewImage = useCallback(async (image: CardImage) => {
@@ -394,19 +621,25 @@ export default function ReaderView({
   }, []);
 
   const handleDeleteCard = useCallback((cardId: string) => {
+    pushUndoSnapshot();
     const target = cardsRef.current.find((card) => card.id === cardId);
-    if (target) deleteCardImages([target]);
+    if (target) {
+      for (const img of target.images ?? []) {
+        pendingDeleteImagesRef.current.set(img.id, img);
+      }
+    }
 
     setCards((prev) => prev.filter((c) => c.id !== cardId));
     setEdges((prev) => prev.filter((e) => e.source !== cardId && e.target !== cardId));
     setAnchors((prev) => prev.filter((a) => a.targetNodeId !== cardId));
-  }, [deleteCardImages]);
+  }, [pushUndoSnapshot]);
 
   const handleDeleteAnchor = useCallback((anchorId: string) => {
+    pushUndoSnapshot();
     setAnchors((prev) => prev.filter((a) => a.id !== anchorId));
     setActiveAnchorId((current) => (current === anchorId ? null : current));
     setAnchorActions(null);
-  }, []);
+  }, [pushUndoSnapshot]);
 
   // 点击操作条和标注以外的地方、或按 Esc 时收起删除操作条。
   useEffect(() => {
@@ -472,26 +705,29 @@ export default function ReaderView({
       list: AnnotationCardItem[]
     ) => {
       const canvasEl = canvasRef.current;
+      const colThreshold = Math.round(252 * cardScale);
+      const rowGap = Math.max(10, Math.round(16 * cardScale));
       const boxes: PlacementBox[] = list
-        .filter((c) => Math.abs(c.x - targetX) < 252)
+        .filter((c) => Math.abs(c.x - targetX) < colThreshold)
         .map((c) => {
           const el = canvasEl?.querySelector<HTMLElement>(`[data-card-id="${c.id}"]`);
-          const h = el ? el.getBoundingClientRect().height : 72;
+          const h = el ? el.getBoundingClientRect().height : Math.round(72 * cardScale);
           return { top: c.y, bottom: c.y + h };
         });
 
-      return nearestFreeY(idealY, newCardEstHeight, boxes);
+      return nearestFreeY(idealY, newCardEstHeight, boxes, rowGap);
     },
-    []
+    [cardScale]
   );
 
   const handleAddChildCard = useCallback(
     (sourceCardId: string) => {
+      pushUndoSnapshot();
       const childId = `card-${Date.now()}`;
       setCards((prev) => {
         const src = prev.find((c) => c.id === sourceCardId);
         if (!src) return prev;
-        const nextX = src.x + 292;
+        const nextX = src.x + Math.round(292 * cardScale);
         const nextY = findNonOverlappingY(nextX, src.y, 56, prev);
         // 父卡片收起时新子卡片会被一起隐藏，所以先展开父卡片。
         const base = src.collapsed
@@ -604,8 +840,8 @@ export default function ReaderView({
 
     // 第一列固定贴近书页右侧边缘，不再叠加 scrollLeft，避免画布平移状态下点整理把卡片永久推向右方。
     const COL_START_X = 44;
-    const COL_STEP_X = 292;
-    const ROW_GAP_Y = 18;
+    const COL_STEP_X = Math.round(292 * cardScale);
+    const ROW_GAP_Y = Math.max(10, Math.round(18 * cardScale));
 
     for (let col = 0; col <= maxCol; col++) {
       const colCards = layoutCards.filter((c) => (colMap.get(c.id) ?? 0) === col);
@@ -681,13 +917,29 @@ export default function ReaderView({
       const next = prev.map((c) => {
         const pos = newPosMap.get(c.id);
         if (!pos) return c;
-        if (Math.abs(c.x - pos.x) <= 0.5 && Math.abs(c.y - pos.y) <= 0.5) return c;
+        const anchorY = anchorTargetYMap.get(c.id);
+        const nextOffset =
+          c.anchorId && anchorY !== undefined
+            ? Math.round(pos.y - anchorY)
+            : c.anchorOffsetY;
+        if (
+          Math.abs(c.x - pos.x) <= 0.5 &&
+          Math.abs(c.y - pos.y) <= 0.5 &&
+          c.anchorOffsetY === nextOffset
+        ) {
+          return c;
+        }
         changed = true;
-        return { ...c, x: pos.x, y: pos.y };
+        return {
+          ...c,
+          x: pos.x,
+          y: pos.y,
+          ...(nextOffset !== undefined ? { anchorOffsetY: nextOffset } : {}),
+        };
       });
       return changed ? next : prev;
     });
-  }, [visibleCards, anchors, edges]);
+  }, [visibleCards, anchors, edges, cardScale]);
 
   // 一键折叠 / 展开之后，等新的卡片高度落到 DOM 上，再整理一次布局，
   // 省得用户还得手动点一次「自动排列」。
@@ -987,12 +1239,23 @@ export default function ReaderView({
           // EPUB books are read straight from disk by byte range, so a 100MB+
           // archive never gets copied into the webview heap.
           const source = { diskPath: book.filePath };
-          const parsed = await parseEpubFile(source);
+          const [parsed, cachedDims] = await Promise.all([
+            parseEpubFile(source),
+            loadEpubImageDims(book.id),
+          ]);
           if (cancelled) return;
+          epubDimsRef.current = cachedDims;
+          epubDimsDirtyRef.current = false;
+          const sizedParagraphs = parsed.paragraphs.map((p) => {
+            if (p.type !== 'image' || !p.imagePath) return p;
+            if (p.imageWidth && p.imageHeight) return p;
+            const dims = cachedDims[p.imagePath];
+            return dims ? { ...p, imageWidth: dims[0], imageHeight: dims[1] } : p;
+          });
           disposeCurrentBook();
           setDocFormat('epub');
           setBookTitle(parsed.title);
-          setParagraphs(parsed.paragraphs);
+          setParagraphs(sizedParagraphs);
           setEpubImageLoader(new EpubImageLoader(source));
           setToc(parsed.toc);
         }
@@ -1077,11 +1340,15 @@ export default function ReaderView({
     el.scrollLeft = Math.min(target.left, maxLeft);
   }, []);
 
+  // 按每个锚点卡片的相对偏移（anchorOffsetY）平滑跟随书页变化，并在移位后做同列防重叠保护。
   const realignDriftedCardsIfNeeded = useCallback(() => {
     const canvasEl = canvasRef.current;
     const bookEl = bookStickyRef.current;
     if (!canvasEl || !bookEl || visibleCards.length === 0) return;
     const canvasRect = canvasEl.getBoundingClientRect();
+
+    const anchorLocalYByCard = new Map<string, number>();
+    const deltaByRoot = new Map<string, number>();
     let maxDrift = 0;
     for (const anchor of anchors) {
       if (!anchor.targetNodeId) continue;
@@ -1094,32 +1361,228 @@ export default function ReaderView({
       const rect = anchorEl.getBoundingClientRect();
       if (rect.height <= 0) continue;
       const localY = Math.max(20, rect.top - canvasRect.top - 10);
-      maxDrift = Math.max(maxDrift, Math.abs(card.y - localY));
-    }
-    if (maxDrift > 36) {
-      handleAutoLayoutCards();
-    }
-  }, [anchors, visibleCards, handleAutoLayoutCards]);
-
-  // EPUB 懒加载图片撑开书页高度后，及时重绘引线并在需要时自动重新对齐锚点卡片。
-  const handleEpubImageLoaded = useCallback(() => {
-    recomputeCardEdges();
-    if (imageAlignTimerRef.current) window.clearTimeout(imageAlignTimerRef.current);
-    imageAlignTimerRef.current = window.setTimeout(() => {
-      imageAlignTimerRef.current = null;
-      if (!userInteractedAfterOpenRef.current && activeRestoreTargetRef.current) {
-        applySavedLocator(activeRestoreTargetRef.current);
+      anchorLocalYByCard.set(card.id, localY);
+      const targetY = Math.max(16, Math.round(localY + (card.anchorOffsetY ?? 0)));
+      const diff = targetY - card.y;
+      if (Math.abs(diff) > 12) {
+        deltaByRoot.set(card.id, diff);
+        maxDrift = Math.max(maxDrift, Math.abs(diff));
       }
-      realignDriftedCardsIfNeeded();
+    }
+    if (deltaByRoot.size === 0) return;
+
+    if (maxDrift > 36 && visibleCards.every((c) => c.anchorOffsetY === undefined)) {
+      handleAutoLayoutCards();
+      return;
+    }
+
+    const outgoing = new Map<string, string[]>();
+    for (const edge of edges) {
+      outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
+    }
+    const shiftById = new Map<string, number>();
+    for (const [rootId, delta] of deltaByRoot.entries()) {
+      const queue = [rootId];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (shiftById.has(id)) continue;
+        shiftById.set(id, delta);
+        for (const childId of outgoing.get(id) ?? []) {
+          if (!deltaByRoot.has(childId)) queue.push(childId);
+        }
+      }
+    }
+
+    // 计算移位后的理想 Y，并按列从下往上做防重叠求解，确保绝不把两张卡片压到一起。
+    const cardHeightMap = new Map<string, number>();
+    for (const c of visibleCards) {
+      const el = canvasEl.querySelector<HTMLElement>(`[data-card-id="${c.id}"]`);
+      cardHeightMap.set(c.id, el ? el.getBoundingClientRect().height : 64);
+    }
+
+    const proposedY = new Map<string, number>();
+    for (const c of visibleCards) {
+      const delta = shiftById.get(c.id) ?? 0;
+      proposedY.set(c.id, Math.max(16, Math.round(c.y + delta)));
+    }
+
+    const resolvedY = new Map<string, number>();
+    const sorted = [...visibleCards].sort(
+      (a, b) => (proposedY.get(b.id) ?? b.y) - (proposedY.get(a.id) ?? a.y)
+    );
+    const placed: { x: number; top: number; bottom: number }[] = [];
+    const colThreshold = Math.round(252 * cardScale);
+    const rowGap = Math.max(10, Math.round(18 * cardScale));
+    for (const c of sorted) {
+      const idealY = proposedY.get(c.id) ?? c.y;
+      const h = cardHeightMap.get(c.id) ?? 64;
+      const sameColBoxes: PlacementBox[] = placed
+        .filter((p) => Math.abs(p.x - c.x) < colThreshold)
+        .map((p) => ({ top: p.top, bottom: p.bottom }));
+      const finalY = nearestFreeY(idealY, h, sameColBoxes, rowGap, 16, 'up');
+      resolvedY.set(c.id, finalY);
+      placed.push({ x: c.x, top: finalY, bottom: finalY + h });
+    }
+
+    setCards((prev) => {
+      let changed = false;
+      const next = prev.map((c) => {
+        const nextY = resolvedY.get(c.id);
+        if (nextY === undefined || Math.abs(nextY - c.y) <= 0.5) return c;
+        changed = true;
+        const anchorY = anchorLocalYByCard.get(c.id);
+        return {
+          ...c,
+          y: nextY,
+          ...(c.anchorId && anchorY !== undefined
+            ? { anchorOffsetY: Math.round(nextY - anchorY) }
+            : {}),
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [anchors, edges, visibleCards, handleAutoLayoutCards, cardScale]);
+
+  const realignRef = useRef(realignDriftedCardsIfNeeded);
+  realignRef.current = realignDriftedCardsIfNeeded;
+  const recomputeEdgesRef = useRef(recomputeCardEdges);
+  recomputeEdgesRef.current = recomputeCardEdges;
+  const autoLayoutRef = useRef(handleAutoLayoutCards);
+  autoLayoutRef.current = handleAutoLayoutCards;
+
+  // 仅在字号、行高、书栏宽度变化时触发平滑跟随；卡片缩放变化时按新比例重排间距。
+  useEffect(() => {
+    if (!docReady) return;
+    const timer = window.setTimeout(() => {
+      realignRef.current();
+      recomputeEdgesRef.current();
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [docReady, settings.fontSize, settings.lineHeight, bookWidth]);
+
+  const prevCardScaleRef = useRef(cardScale);
+  useEffect(() => {
+    if (prevCardScaleRef.current === cardScale) return;
+    prevCardScaleRef.current = cardScale;
+    if (!docReady) return;
+    const timer = window.setTimeout(() => {
+      autoLayoutRef.current();
+      recomputeEdgesRef.current();
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [docReady, cardScale]);
+
+  // 右侧画布支持 ⌘/Ctrl + 滚轮进行锚点原地缩放。
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.metaKey && !e.ctrlKey) return;
+      e.preventDefault();
+      const step = e.deltaY < 0 ? 0.1 : -0.1;
+      const next = Math.min(1.2, Math.max(0.5, +(prevCardScaleRef.current + step).toFixed(2)));
+      if (next !== prevCardScaleRef.current) {
+        onSettingsChange({ cardScale: next });
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [onSettingsChange]);
+
+  const handleStartAnnotateImage = useCallback(async (cardId: string, image: CardImage) => {
+    const url = await createFullImageUrl(image);
+    if (!url) return;
+    setAnnotatingImage({ cardId, image, url });
+  }, []);
+
+  const handleCloseAnnotator = useCallback(() => {
+    setAnnotatingImage((cur) => {
+      if (cur) revokeObjectUrlIfBlob(cur.url);
+      return null;
+    });
+  }, []);
+
+  const handleSaveAnnotatedImage = useCallback(
+    async (file: File) => {
+      const target = annotatingImage;
+      if (!target) return;
+      const imported = await importImageFiles([file]);
+      const replacement = imported[0];
+      if (!replacement) {
+        handleCloseAnnotator();
+        return;
+      }
+      pushUndoSnapshot();
+      pendingDeleteImagesRef.current.set(target.image.id, target.image);
+      setCards((prev) =>
+        prev.map((c) =>
+          c.id === target.cardId
+            ? {
+                ...c,
+                images: (c.images ?? []).map((img) =>
+                  img.id === target.image.id ? replacement : img
+                ),
+              }
+            : c
+        )
+      );
+      handleCloseAnnotator();
+    },
+    [annotatingImage, handleCloseAnnotator, pushUndoSnapshot]
+  );
+
+  // EPUB 懒加载图片撑开书页高度后，缓存其真实尺寸，并及时重绘引线与对齐锚点卡片。
+  const handleEpubImageLoaded = useCallback(
+    (imagePath?: string, width?: number, height?: number) => {
+      if (imagePath && width && height) {
+        const prev = epubDimsRef.current[imagePath];
+        if (!prev || prev[0] !== width || prev[1] !== height) {
+          epubDimsRef.current[imagePath] = [width, height];
+          epubDimsDirtyRef.current = true;
+          if (epubDimsTimerRef.current) window.clearTimeout(epubDimsTimerRef.current);
+          epubDimsTimerRef.current = window.setTimeout(() => {
+            epubDimsTimerRef.current = null;
+            if (!epubDimsDirtyRef.current) return;
+            epubDimsDirtyRef.current = false;
+            void saveEpubImageDims(book.id, epubDimsRef.current);
+          }, 800);
+        }
+      }
       recomputeCardEdges();
-    }, 150);
-  }, [applySavedLocator, realignDriftedCardsIfNeeded, recomputeCardEdges]);
+      if (imageAlignTimerRef.current) window.clearTimeout(imageAlignTimerRef.current);
+      imageAlignTimerRef.current = window.setTimeout(() => {
+        imageAlignTimerRef.current = null;
+        if (!userInteractedAfterOpenRef.current && activeRestoreTargetRef.current) {
+          applySavedLocator(activeRestoreTargetRef.current);
+        }
+        realignDriftedCardsIfNeeded();
+        recomputeCardEdges();
+      }, 150);
+    },
+    [book.id, applySavedLocator, realignDriftedCardsIfNeeded, recomputeCardEdges]
+  );
 
   useEffect(() => {
     return () => {
       if (imageAlignTimerRef.current) window.clearTimeout(imageAlignTimerRef.current);
+      if (epubDimsTimerRef.current) window.clearTimeout(epubDimsTimerRef.current);
+      if (epubDimsDirtyRef.current) {
+        epubDimsDirtyRef.current = false;
+        void saveEpubImageDims(book.id, epubDimsRef.current);
+      }
+      // 离开书籍时，清理确认不再被任何卡片引用的待删除图片文件（保留撤销期间的无损恢复能力）。
+      const liveImageIds = new Set<string>();
+      for (const card of latestAnnotationsRef.current.cards) {
+        for (const img of card.images ?? []) liveImageIds.add(img.id);
+      }
+      for (const [id, img] of pendingDeleteImagesRef.current.entries()) {
+        if (!liveImageIds.has(id)) {
+          void deleteStoredImage(img);
+        }
+      }
+      pendingDeleteImagesRef.current.clear();
     };
-  }, []);
+  }, [book.id]);
 
   // Restore the reading position once layout has settled, and auto-align drifted cards on open.
   useEffect(() => {
@@ -1685,11 +2148,73 @@ export default function ReaderView({
             <GitCommitHorizontal size={15} />
           </button>
 
+          <div className="topbar__zoom-group" title="右侧卡片原地缩放（也可在画布按 ⌘+滚轮）">
+            <button
+              type="button"
+              className="topbar__icon-btn"
+              title="缩小卡片"
+              disabled={cardScale <= 0.5}
+              onClick={() =>
+                onSettingsChange({
+                  cardScale: Math.max(0.5, +(cardScale - 0.1).toFixed(2)),
+                })
+              }
+            >
+              <ZoomOut size={14} />
+            </button>
+            <button
+              type="button"
+              className="topbar__zoom-label topbar__zoom-reset"
+              title="点击恢复卡片 100% 大小"
+              onClick={() => onSettingsChange({ cardScale: 1 })}
+            >
+              {Math.round(cardScale * 100)}%
+            </button>
+            <button
+              type="button"
+              className="topbar__icon-btn"
+              title="放大卡片"
+              disabled={cardScale >= 1.2}
+              onClick={() =>
+                onSettingsChange({
+                  cardScale: Math.min(1.2, +(cardScale + 0.1).toFixed(2)),
+                })
+              }
+            >
+              <ZoomIn size={14} />
+            </button>
+          </div>
+
+          <span className="topbar__divider" />
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title="撤销 (⌘Z)"
+            disabled={!historyState.canUndo}
+            onClick={handleUndo}
+          >
+            <Undo2 size={15} />
+          </button>
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title="重做 (⇧⌘Z)"
+            disabled={!historyState.canRedo}
+            onClick={handleRedo}
+          >
+            <Redo2 size={15} />
+          </button>
+
           <button
             type="button"
             className="topbar__icon-btn"
             title="自动排列：按批注层级把卡片上下对称铺开"
-            onClick={handleAutoLayoutCards}
+            onClick={() => {
+              pushUndoSnapshot();
+              handleAutoLayoutCards();
+            }}
           >
             <LayoutGrid size={15} />
           </button>
@@ -1730,6 +2255,26 @@ export default function ReaderView({
           </button>
 
           <span className="topbar__divider" />
+
+          {exportNotice && <span className="topbar__notice">{exportNotice}</span>}
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title="搜索原文与批注 (⌘K)"
+            onClick={() => setShowSearch(true)}
+          >
+            <Search size={15} />
+          </button>
+
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            title="导出本书批注为 Markdown"
+            onClick={() => void handleExportMarkdown()}
+          >
+            <Download size={15} />
+          </button>
 
           <button
             type="button"
@@ -1887,6 +2432,7 @@ export default function ReaderView({
                 <AnnotationCard
                   key={card.id}
                   card={card}
+                  cardScale={cardScale}
                   hiddenCount={hiddenCountByCard.get(card.id) ?? 0}
                   isSelected={
                     selectedCardId === card.id ||
@@ -1902,6 +2448,7 @@ export default function ReaderView({
                   onAddImages={handleAddImages}
                   onRemoveImage={handleRemoveImage}
                   onPreviewImage={handlePreviewImage}
+                  onAnnotateImage={handleStartAnnotateImage}
                   onUpdateStatus={handleUpdateStatus}
                   onAddChild={handleAddChildCard}
                   onDelete={handleDeleteCard}
@@ -1960,6 +2507,26 @@ export default function ReaderView({
             </div>
           );
         })()}
+
+      <SearchModal
+        open={showSearch}
+        currentBookId={book.id}
+        currentBookTitle={bookTitle || book.title}
+        paragraphs={paragraphs}
+        anchors={anchors}
+        cards={cards}
+        onClose={() => setShowSearch(false)}
+        onSelect={handleSearchSelect}
+      />
+
+      {/* Built-in Image Annotator Modal (arrows, rectangles, text) */}
+      {annotatingImage && (
+        <ImageAnnotatorModal
+          imageUrl={annotatingImage.url}
+          onCancel={handleCloseAnnotator}
+          onSave={handleSaveAnnotatedImage}
+        />
+      )}
 
       {/* Fullscreen Image Lightbox Modal (click backdrop or press Esc to close) */}
       {previewImage && (

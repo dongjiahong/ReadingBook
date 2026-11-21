@@ -119,6 +119,39 @@ export async function loadAnnotations(bookId: string): Promise<BookAnnotations |
   };
 }
 
+export interface BookAnnotationsSummary {
+  bookId: string;
+  bookTitle: string;
+  annotations: BookAnnotations;
+}
+
+export async function loadAllBookAnnotations(): Promise<BookAnnotationsSummary[]> {
+  const db = await getDb();
+  const rows = await db.select<
+    {
+      book_id: string;
+      title: string;
+      anchors_json: string;
+      cards_json: string;
+      edges_json: string;
+    }[]
+  >(
+    `SELECT ba.book_id, b.title, ba.anchors_json, ba.cards_json, ba.edges_json
+     FROM book_annotations ba
+     JOIN books b ON b.id = ba.book_id
+     ORDER BY ba.updated_at DESC`
+  );
+  return rows.map((row) => ({
+    bookId: row.book_id,
+    bookTitle: row.title,
+    annotations: {
+      anchors: JSON.parse(row.anchors_json),
+      cards: JSON.parse(row.cards_json),
+      edges: JSON.parse(row.edges_json),
+    },
+  }));
+}
+
 export async function saveAnnotations(
   bookId: string,
   annotations: BookAnnotations

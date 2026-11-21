@@ -22,7 +22,7 @@ interface BookPaneProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   epubImageLoader?: EpubImageLoader | null;
   onPreviewImage?: (blob: Blob, alt: string) => void;
-  onImageLoaded?: () => void;
+  onImageLoaded?: (imagePath?: string, width?: number, height?: number) => void;
   onScroll: () => void;
   onCreateAnnotation: (draft: {
     paragraphId: string;
@@ -431,7 +431,7 @@ interface EpubImageProps {
   loader: EpubImageLoader | null;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   onPreviewImage?: (blob: Blob, alt: string) => void;
-  onImageLoaded?: () => void;
+  onImageLoaded?: (imagePath?: string, width?: number, height?: number) => void;
 }
 
 const EpubImage: React.FC<EpubImageProps> = ({
@@ -564,8 +564,13 @@ const EpubImage: React.FC<EpubImageProps> = ({
               ? { width: `${inlineSize}px`, height: 'auto' }
               : undefined
           }
-          onLoad={() => {
-            onImageLoaded?.();
+          onLoad={(e) => {
+            const img = e.currentTarget;
+            onImageLoaded?.(
+              paragraph.imagePath,
+              img.naturalWidth || undefined,
+              img.naturalHeight || undefined
+            );
           }}
           onClick={(e) => {
             e.stopPropagation();

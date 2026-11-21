@@ -47,6 +47,8 @@ export interface AnnotationCardItem {
   images?: CardImage[];
   status?: 'pending' | 'accepted' | 'rejected';
   anchorId?: string;
+  /** 相对所属书页锚点的垂直偏移量（px）；重排/字号变化/图片加载后按此保持相对位置。 */
+  anchorOffsetY?: number;
   /** 思维导图式折叠：收起自身内容，并隐藏全部后代卡片。 */
   collapsed?: boolean;
 }
@@ -95,6 +97,8 @@ export interface ReaderSettings {
   lineHeight: number;
   bookWidth: number;
   fontFamily: ReaderFont;
+  /** 右侧批注卡片锚点原地缩放比例（0.5 ~ 1.2，默认 1）。 */
+  cardScale?: number;
 }
 
 export interface BookAnnotations {

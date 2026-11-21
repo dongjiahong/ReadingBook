@@ -25,6 +25,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   lineHeight: 1.85,
   bookWidth: 580,
   fontFamily: 'system',
+  cardScale: 1,
 };
 
 export default function App() {
@@ -156,6 +157,10 @@ export default function App() {
           onBack={() => {
             setActiveBookId(null);
             void refreshBooks();
+          }}
+          onSwitchBook={(bookId) => {
+            const target = books.find((item) => item.id === bookId);
+            if (target) void handleOpenBook(target);
           }}
           onOpenSettings={() => setShowSettings(true)}
           onSettingsChange={updateSettings}

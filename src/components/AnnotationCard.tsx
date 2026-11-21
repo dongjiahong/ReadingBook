@@ -5,6 +5,7 @@ import {
   ChevronRight,
   ImagePlus,
   Link2,
+  Pencil,
   Plus,
   Trash2,
   X,
@@ -14,6 +15,7 @@ import { importImageFiles } from '../utils/imageStore';
 
 interface AnnotationCardProps {
   card: AnnotationCardItem;
+  cardScale?: number;
   isSelected: boolean;
   onSelect: (cardId: string) => void;
   onMoveCard: (cardId: string, nextX: number, nextY: number) => void;
@@ -21,6 +23,7 @@ interface AnnotationCardProps {
   onAddImages: (cardId: string, newImages: CardImage[]) => void;
   onRemoveImage: (cardId: string, image: CardImage) => void;
   onPreviewImage: (image: CardImage) => void;
+  onAnnotateImage?: (cardId: string, image: CardImage) => void;
   onUpdateStatus: (cardId: string, status: 'accepted' | 'rejected') => void;
   onAddChild: (sourceCardId: string) => void;
   onDelete: (cardId: string) => void;
@@ -35,6 +38,7 @@ interface AnnotationCardProps {
 
 export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function AnnotationCard({
   card,
+  cardScale = 1,
   isSelected,
   onSelect,
   onMoveCard,
@@ -42,6 +46,7 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
   onAddImages,
   onRemoveImage,
   onPreviewImage,
+  onAnnotateImage,
   onAddChild,
   onDelete,
   onFocusAnchor,
@@ -180,6 +185,8 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
         position: 'absolute',
         left: `${x}px`,
         top: `${y}px`,
+        transform: cardScale !== 1 ? `scale(${cardScale})` : undefined,
+        transformOrigin: 'left top',
       }}
       className={[
         'anno-card',
@@ -328,6 +335,19 @@ export const AnnotationCard: React.FC<AnnotationCardProps> = memo(function Annot
                     onPreviewImage(image);
                   }}
                 />
+                {onAnnotateImage && (
+                  <button
+                    type="button"
+                    className="anno-card__img-edit"
+                    title="标注图片（箭头 / 方框 / 文字）"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAnnotateImage(id, image);
+                    }}
+                  >
+                    <Pencil size={10} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="anno-card__img-remove"
