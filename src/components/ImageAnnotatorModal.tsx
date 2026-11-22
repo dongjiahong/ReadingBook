@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   ArrowUpRight,
   Check,
   Highlighter,
   Minus,
   MousePointer2,
   Pencil,
+  Rows3,
   Square,
   Trash2,
   Type,
@@ -13,7 +15,15 @@ import {
   X,
 } from 'lucide-react';
 
-type AnnotatorTool = 'select' | 'arrow' | 'line' | 'rect' | 'highlighter' | 'text';
+type AnnotatorTool =
+  | 'select'
+  | 'arrow'
+  | 'line'
+  | 'rect'
+  | 'highlighter'
+  | 'fib-mm'
+  | 'fib-ext'
+  | 'text';
 type ConvertibleKind = 'arrow' | 'line' | 'rect';
 
 type Shape =
@@ -52,6 +62,26 @@ type Shape =
     }
   | {
       id: string;
+      kind: 'fib-mm';
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      color: string;
+    }
+  | {
+      id: string;
+      kind: 'fib-ext';
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      x3: number;
+      y3: number;
+      color: string;
+    }
+  | {
+      id: string;
       kind: 'text';
       x: number;
       y: number;
@@ -61,7 +91,18 @@ type Shape =
       maxWidth?: number;
     };
 
-type HandleId = 'start' | 'end' | 'nw' | 'ne' | 'sw' | 'se' | 'w' | 'e';
+type HandleId =
+  | 'start'
+  | 'end'
+  | 'p1'
+  | 'p2'
+  | 'p3'
+  | 'nw'
+  | 'ne'
+  | 'sw'
+  | 'se'
+  | 'w'
+  | 'e';
 
 interface HandlePoint {
   id: HandleId;
@@ -88,6 +129,12 @@ interface TextDraftState {
   fontSize: number;
   maxWidth?: number;
   initialCssWidth: number;
+}
+
+interface FibExtDraftState {
+  points: { x: number; y: number }[];
+  cursor: { x: number; y: number } | null;
+  color: string;
 }
 
 const PALETTE = [
@@ -212,6 +259,46 @@ function distToSegment(
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
+function getFibMmLayout(
+  shape: Pick<Extract<Shape, { kind: 'fib-mm' }>, 'x1' | 'y1' | 'x2' | 'y2'>,
+  strokeScale: number
+) {
+  const minSpan = Math.max(48, 56 * strokeScale);
+  let leftX = Math.min(shape.x1, shape.x2);
+  let rightX = Math.max(shape.x1, shape.x2);
+  if (rightX - leftX < minSpan) {
+    rightX = leftX + minSpan;
+  }
+  const dy = shape.y2 - shape.y1;
+  const levels = [
+    { label: '1', y: shape.y1 },
+    { label: '0', y: shape.y2 },
+    { label: '-1', y: shape.y2 + dy },
+  ];
+  return { leftX, rightX, levels };
+}
+
+function getFibExtLayout(
+  shape: Pick<
+    Extract<Shape, { kind: 'fib-ext' }>,
+    'x1' | 'y1' | 'x2' | 'y2' | 'x3' | 'y3'
+  >,
+  strokeScale: number
+) {
+  const minSpan = Math.max(48, 56 * strokeScale);
+  let leftX = Math.min(shape.x2, shape.x3);
+  let rightX = Math.max(shape.x2, shape.x3);
+  if (rightX - leftX < minSpan) {
+    rightX = leftX + minSpan;
+  }
+  const dy = shape.y2 - shape.y1;
+  const levels = [
+    { label: '0', y: shape.y3 },
+    { label: '1', y: shape.y3 + dy },
+  ];
+  return { leftX, rightX, levels };
+}
+
 function getShapeBounds(
   ctx: CanvasRenderingContext2D | null,
   shape: Shape,
@@ -231,6 +318,27 @@ function getShapeBounds(
       minY: Math.min(shape.y, shape.y + shape.h),
       maxX: Math.max(shape.x, shape.x + shape.w),
       maxY: Math.max(shape.y, shape.y + shape.h),
+    };
+  }
+  if (shape.kind === 'fib-mm') {
+    const { leftX, rightX, levels } = getFibMmLayout(shape, strokeScale);
+    const ys = levels.map((l) => l.y);
+    return {
+      minX: leftX,
+      minY: Math.min(...ys),
+      maxX: rightX,
+      maxY: Math.max(...ys),
+    };
+  }
+  if (shape.kind === 'fib-ext') {
+    const { leftX, rightX, levels } = getFibExtLayout(shape, strokeScale);
+    const xs = [shape.x1, shape.x2, shape.x3, leftX, rightX];
+    const ys = [shape.y1, shape.y2, shape.y3, ...levels.map((l) => l.y)];
+    return {
+      minX: Math.min(...xs),
+      minY: Math.min(...ys),
+      maxX: Math.max(...xs),
+      maxY: Math.max(...ys),
     };
   }
   if (shape.kind === 'highlighter') {
@@ -286,10 +394,17 @@ function getShapeHandles(
   shape: Shape,
   strokeScale: number
 ): HandlePoint[] {
-  if (shape.kind === 'arrow' || shape.kind === 'line') {
+  if (shape.kind === 'arrow' || shape.kind === 'line' || shape.kind === 'fib-mm') {
     return [
       { id: 'start', x: shape.x1, y: shape.y1 },
       { id: 'end', x: shape.x2, y: shape.y2 },
+    ];
+  }
+  if (shape.kind === 'fib-ext') {
+    return [
+      { id: 'p1', x: shape.x1, y: shape.y1 },
+      { id: 'p2', x: shape.x2, y: shape.y2 },
+      { id: 'p3', x: shape.x3, y: shape.y3 },
     ];
   }
   if (shape.kind === 'rect' || shape.kind === 'highlighter') {
@@ -326,7 +441,6 @@ function hitTestHandle(
       return h.id;
     }
   }
-  // Allow dragging anywhere along the left/right vertical boundary of a selected text box to re-wrap
   if (shape.kind === 'text') {
     const b = getShapeBounds(ctx, shape, strokeScale);
     if (py >= b.minY - hitRadius && py <= b.maxY + hitRadius) {
@@ -349,6 +463,31 @@ function hitTestShape(
   const tol = Math.max(tolerance, 8 * strokeScale);
   if (shape.kind === 'arrow' || shape.kind === 'line') {
     return distToSegment(px, py, shape.x1, shape.y1, shape.x2, shape.y2) <= tol;
+  }
+  if (shape.kind === 'fib-mm') {
+    const { leftX, rightX, levels } = getFibMmLayout(shape, strokeScale);
+    if (distToSegment(px, py, shape.x1, shape.y1, shape.x2, shape.y2) <= tol) return true;
+    for (const lv of levels) {
+      if (distToSegment(px, py, leftX - 18 * strokeScale, lv.y, rightX, lv.y) <= tol) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (shape.kind === 'fib-ext') {
+    const { leftX, rightX, levels } = getFibExtLayout(shape, strokeScale);
+    if (
+      distToSegment(px, py, shape.x1, shape.y1, shape.x2, shape.y2) <= tol ||
+      distToSegment(px, py, shape.x2, shape.y2, shape.x3, shape.y3) <= tol
+    ) {
+      return true;
+    }
+    for (const lv of levels) {
+      if (distToSegment(px, py, leftX - 18 * strokeScale, lv.y, rightX, lv.y) <= tol) {
+        return true;
+      }
+    }
+    return false;
   }
   if (shape.kind === 'rect') {
     const b = getShapeBounds(ctx, shape, strokeScale);
@@ -385,13 +524,11 @@ function findTopShapeAt(
   strokeScale: number,
   tolerance: number
 ): Shape | null {
-  // Pass 1: exact strokes, text, and rectangle borders
   for (let i = shapes.length - 1; i >= 0; i -= 1) {
     if (hitTestShape(ctx, shapes[i], px, py, strokeScale, tolerance, false)) {
       return shapes[i];
     }
   }
-  // Pass 2: rectangle interior fallback
   for (let i = shapes.length - 1; i >= 0; i -= 1) {
     if (
       shapes[i].kind === 'rect' &&
@@ -404,13 +541,24 @@ function findTopShapeAt(
 }
 
 function translateShape(shape: Shape, dx: number, dy: number): Shape {
-  if (shape.kind === 'arrow' || shape.kind === 'line') {
+  if (shape.kind === 'arrow' || shape.kind === 'line' || shape.kind === 'fib-mm') {
     return {
       ...shape,
       x1: shape.x1 + dx,
       y1: shape.y1 + dy,
       x2: shape.x2 + dx,
       y2: shape.y2 + dy,
+    };
+  }
+  if (shape.kind === 'fib-ext') {
+    return {
+      ...shape,
+      x1: shape.x1 + dx,
+      y1: shape.y1 + dy,
+      x2: shape.x2 + dx,
+      y2: shape.y2 + dy,
+      x3: shape.x3 + dx,
+      y3: shape.y3 + dy,
     };
   }
   if (shape.kind === 'rect') {
@@ -439,7 +587,6 @@ function convertShapeKind(shape: Shape, targetKind: ConvertibleKind): Shape {
         color: shape.color,
       };
     }
-    // arrow/line -> rect
     const minX = Math.min(shape.x1, shape.x2);
     const minY = Math.min(shape.y1, shape.y2);
     const w = Math.max(24, Math.abs(shape.x2 - shape.x1));
@@ -466,6 +613,43 @@ function convertShapeKind(shape: Shape, targetKind: ConvertibleKind): Shape {
     };
   }
   return shape;
+}
+
+function drawFibLevels(
+  ctx: CanvasRenderingContext2D,
+  leftX: number,
+  rightX: number,
+  levels: { label: string; y: number }[],
+  color: string,
+  strokeScale: number
+) {
+  const lineWidth = Math.max(2, 2.2 * strokeScale);
+  const labelSize = Math.max(12, Math.round(14 * strokeScale));
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.setLineDash([]);
+  ctx.font = `600 ${labelSize}px -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif`;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+
+  const labelGap = Math.max(7, 8 * strokeScale);
+  for (const lv of levels) {
+    ctx.beginPath();
+    ctx.moveTo(leftX, lv.y);
+    ctx.lineTo(rightX, lv.y);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.lineWidth = Math.max(3, 3.5 * strokeScale);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+    ctx.strokeText(lv.label, leftX - labelGap, lv.y);
+    ctx.fillStyle = color;
+    ctx.fillText(lv.label, leftX - labelGap, lv.y);
+    ctx.restore();
+  }
+  ctx.restore();
 }
 
 function drawShape(
@@ -510,6 +694,37 @@ function drawShape(
     ctx.stroke();
   } else if (shape.kind === 'rect') {
     ctx.strokeRect(shape.x, shape.y, shape.w, shape.h);
+  } else if (shape.kind === 'fib-mm') {
+    const { leftX, rightX, levels } = getFibMmLayout(shape, strokeScale);
+    drawFibLevels(ctx, leftX, rightX, levels, shape.color, strokeScale);
+
+    // Dashed trendline connecting P1 -> P2
+    ctx.save();
+    ctx.strokeStyle = shape.color;
+    ctx.globalAlpha = 0.72;
+    ctx.lineWidth = Math.max(1.6, 1.8 * strokeScale);
+    ctx.setLineDash([6 * strokeScale, 5 * strokeScale]);
+    ctx.beginPath();
+    ctx.moveTo(shape.x1, shape.y1);
+    ctx.lineTo(shape.x2, shape.y2);
+    ctx.stroke();
+    ctx.restore();
+  } else if (shape.kind === 'fib-ext') {
+    const { leftX, rightX, levels } = getFibExtLayout(shape, strokeScale);
+    drawFibLevels(ctx, leftX, rightX, levels, shape.color, strokeScale);
+
+    // Dashed trendline connecting A -> B -> C
+    ctx.save();
+    ctx.strokeStyle = shape.color;
+    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = Math.max(1.8, 2 * strokeScale);
+    ctx.setLineDash([7 * strokeScale, 5 * strokeScale]);
+    ctx.beginPath();
+    ctx.moveTo(shape.x1, shape.y1);
+    ctx.lineTo(shape.x2, shape.y2);
+    ctx.lineTo(shape.x3, shape.y3);
+    ctx.stroke();
+    ctx.restore();
   } else if (shape.kind === 'highlighter') {
     if (shape.points.length >= 2) {
       ctx.globalAlpha = 0.32;
@@ -560,7 +775,7 @@ function drawSelectionOverlay(
       b.maxX - b.minX + pad * 2,
       b.maxY - b.minY + pad * 2
     );
-  } else {
+  } else if (shape.kind === 'arrow' || shape.kind === 'line') {
     ctx.beginPath();
     ctx.moveTo(shape.x1, shape.y1);
     ctx.lineTo(shape.x2, shape.y2);
@@ -599,14 +814,28 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [undoStack, setUndoStack] = useState<Shape[][]>([]);
   const [draftShape, setDraftShape] = useState<Shape | null>(null);
+  const [fibExtDraft, setFibExtDraft] = useState<FibExtDraftState | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoverCursor, setHoverCursor] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState<TextDraftState | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const shapesRef = useRef(shapes);
   shapesRef.current = shapes;
+
+  const hasUnsavedChanges =
+    shapes.length > 0 || Boolean(textDraft && textDraft.value.trim().length > 0);
+
+  const requestClose = useCallback(() => {
+    if (saving) return;
+    if (hasUnsavedChanges) {
+      setConfirmDiscard(true);
+      return;
+    }
+    onCancel();
+  }, [saving, hasUnsavedChanges, onCancel]);
 
   const selectedShape = useMemo(
     () => (selectedId ? shapes.find((s) => s.id === selectedId) ?? null : null),
@@ -718,17 +947,63 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     }
     if (draftShape) drawShape(ctx, draftShape, strokeScale);
 
+    // Live preview for 3-point AB=CD Fib Extension while placing points
+    if (fibExtDraft && fibExtDraft.points.length > 0) {
+      const pts = fibExtDraft.points;
+      const cur = fibExtDraft.cursor;
+      if (pts.length === 2 && cur) {
+        drawShape(
+          ctx,
+          {
+            id: 'fib-ext-preview',
+            kind: 'fib-ext',
+            x1: pts[0].x,
+            y1: pts[0].y,
+            x2: pts[1].x,
+            y2: pts[1].y,
+            x3: cur.x,
+            y3: cur.y,
+            color: fibExtDraft.color,
+          },
+          strokeScale
+        );
+      } else if (pts.length === 1 && cur) {
+        ctx.save();
+        ctx.strokeStyle = fibExtDraft.color;
+        ctx.globalAlpha = 0.78;
+        ctx.lineWidth = Math.max(1.8, 2 * strokeScale);
+        ctx.setLineDash([7 * strokeScale, 5 * strokeScale]);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        ctx.lineTo(cur.x, cur.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+      // Draw placed anchor dots
+      const px = Math.max(1, imgPerCss);
+      ctx.save();
+      for (const p of pts) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5 * px, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.lineWidth = 2 * px;
+        ctx.strokeStyle = '#2563eb';
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     if (selectedId && !textDraft) {
       const sel = shapes.find((s) => s.id === selectedId);
       if (sel) drawSelectionOverlay(ctx, sel, strokeScale, imgPerCss);
     }
-  }, [shapes, draftShape, selectedId, textDraft]);
+  }, [shapes, draftShape, fibExtDraft, selectedId, textDraft]);
 
   useEffect(() => {
     if (loaded) redraw();
   }, [loaded, redraw]);
 
-  // Focus text input only when a new text editing session begins (not on every keystroke)
   const textSessionId = textDraft?.sessionId ?? null;
   useEffect(() => {
     if (textSessionId === null) return;
@@ -744,7 +1019,6 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     return () => cancelAnimationFrame(raf);
   }, [textSessionId]);
 
-  // Auto-grow transparent textarea height as user types, wraps lines, or changes font size
   const textDraftValue = textDraft?.value ?? '';
   const textDraftFontSize = textDraft?.fontSize ?? DEFAULT_TEXT_BASE_SIZE;
   useEffect(() => {
@@ -878,6 +1152,9 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
   const handleColorSelect = useCallback(
     (nextColor: string) => {
       setColor(nextColor);
+      if (fibExtDraft) {
+        setFibExtDraft((prev) => (prev ? { ...prev, color: nextColor } : null));
+      }
       if (textDraft) {
         setTextDraft((prev) => (prev ? { ...prev, color: nextColor } : null));
         return;
@@ -891,7 +1168,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         }
       }
     },
-    [selectedId, textDraft, pushHistory]
+    [selectedId, textDraft, fibExtDraft, pushHistory]
   );
 
   const handleTextSizeSelect = useCallback(
@@ -936,10 +1213,18 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (confirmDiscard) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setConfirmDiscard(false);
+        }
+        return;
+      }
       if (textDraft) return;
       if (e.key === 'Escape') {
-        if (selectedId) setSelectedId(null);
-        else onCancel();
+        if (fibExtDraft) setFibExtDraft(null);
+        else if (selectedId) setSelectedId(null);
+        else requestClose();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         handleUndo();
@@ -950,14 +1235,17 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         e.preventDefault();
         openTextEditorForShape(selectedShape);
       } else if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'v') {
+        setFibExtDraft(null);
         setTool('select');
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
-    onCancel,
+    confirmDiscard,
+    requestClose,
     textDraft,
+    fibExtDraft,
     selectedId,
     selectedShape,
     handleUndo,
@@ -982,14 +1270,19 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       mutated = true;
 
       let updated: Shape = origShape;
-      if (origShape.kind === 'arrow' || origShape.kind === 'line') {
+      if (
+        origShape.kind === 'arrow' ||
+        origShape.kind === 'line' ||
+        origShape.kind === 'fib-mm'
+      ) {
+        const useSnap = origShape.kind !== 'fib-mm' && moveEvt.shiftKey;
         if (handleId === 'start') {
           const snapped = snapEndpoint(
             origShape.x2,
             origShape.y2,
             cur.imgX,
             cur.imgY,
-            moveEvt.shiftKey
+            useSnap
           );
           updated = { ...origShape, x1: snapped.x, y1: snapped.y };
         } else {
@@ -998,9 +1291,17 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
             origShape.y1,
             cur.imgX,
             cur.imgY,
-            moveEvt.shiftKey
+            useSnap
           );
           updated = { ...origShape, x2: snapped.x, y2: snapped.y };
+        }
+      } else if (origShape.kind === 'fib-ext') {
+        if (handleId === 'p1') {
+          updated = { ...origShape, x1: cur.imgX, y1: cur.imgY };
+        } else if (handleId === 'p2') {
+          updated = { ...origShape, x2: cur.imgX, y2: cur.imgY };
+        } else if (handleId === 'p3') {
+          updated = { ...origShape, x3: cur.imgX, y3: cur.imgY };
         }
       } else if (origShape.kind === 'rect') {
         const x1 = handleId === 'nw' || handleId === 'sw' ? cur.imgX : origBounds.minX;
@@ -1098,6 +1399,15 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     }
     const pt = toImageCoords(e.clientX, e.clientY);
     if (!pt) return;
+
+    if (fibExtDraft) {
+      setFibExtDraft((prev) =>
+        prev ? { ...prev, cursor: { x: pt.imgX, y: pt.imgY } } : null
+      );
+      if (hoverCursor !== 'crosshair') setHoverCursor('crosshair');
+      return;
+    }
+
     const ctx = canvas.getContext('2d');
     const strokeScale = getStrokeScale(canvas.width, canvas.height);
     const handleRadius = Math.max(10 * pt.imgPerCss, 10 * strokeScale);
@@ -1137,7 +1447,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
   const handleCanvasDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || fibExtDraft) return;
     const pt = toImageCoords(e.clientX, e.clientY);
     if (!pt) return;
     const ctx = canvas.getContext('2d');
@@ -1164,7 +1474,62 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     const strokeScale = getStrokeScale(canvas.width, canvas.height);
     const handleRadius = Math.max(10 * pt.imgPerCss, 10 * strokeScale);
 
-    // Always allow dragging a handle of the currently selected shape, even while in a draw tool
+    // 3-point AB=CD Fib Extension placement
+    if (tool === 'fib-ext' && !fibExtDraft && selectedShape) {
+      const hitHandle = hitTestHandle(
+        ctx,
+        selectedShape,
+        pt.imgX,
+        pt.imgY,
+        strokeScale,
+        handleRadius
+      );
+      if (hitHandle) {
+        e.preventDefault();
+        startDragHandle(selectedShape, hitHandle, strokeScale);
+        return;
+      }
+    }
+
+    if (tool === 'fib-ext') {
+      e.preventDefault();
+      const p = { x: pt.imgX, y: pt.imgY };
+      if (!fibExtDraft) {
+        setSelectedId(null);
+        setFibExtDraft({ points: [p], cursor: p, color });
+        return;
+      }
+      if (fibExtDraft.points.length === 1) {
+        setFibExtDraft({
+          ...fibExtDraft,
+          points: [...fibExtDraft.points, p],
+          cursor: p,
+        });
+        return;
+      }
+      // 3rd point placed -> finalize AB=CD Fib Extension
+      const [p1, p2] = fibExtDraft.points;
+      const newId = nextShapeId();
+      const created: Shape = {
+        id: newId,
+        kind: 'fib-ext',
+        x1: p1.x,
+        y1: p1.y,
+        x2: p2.x,
+        y2: p2.y,
+        x3: p.x,
+        y3: p.y,
+        color: fibExtDraft.color,
+      };
+      const cur = shapesRef.current;
+      pushHistory(cur);
+      setShapes([...cur, created]);
+      setFibExtDraft(null);
+      setSelectedId(newId);
+      return;
+    }
+
+    // Always allow dragging a handle of the currently selected shape
     if (selectedShape) {
       const hitHandle = hitTestHandle(
         ctx,
@@ -1198,9 +1563,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     }
 
     if (tool === 'text') {
-      // Prevent browser default mousedown focus reset so the newly mounted textarea keeps focus!
       e.preventDefault();
-      // If clicking directly on an existing text annotation, edit it instead of stacking a new one
       const hit = findTopShapeAt(ctx, shapes, pt.imgX, pt.imgY, strokeScale, 8 * pt.imgPerCss);
       if (hit && hit.kind === 'text') {
         openTextEditorForShape(hit);
@@ -1254,6 +1617,16 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
           y1: startY,
           x2: snapped.x,
           y2: snapped.y,
+          color: drawColor,
+        });
+      } else if (tool === 'fib-mm') {
+        setDraftShape({
+          id: draftId,
+          kind: 'fib-mm',
+          x1: startX,
+          y1: startY,
+          x2: cur.imgX,
+          y2: cur.imgY,
           color: drawColor,
         });
       } else if (tool === 'highlighter') {
@@ -1322,6 +1695,16 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
               y2: snapped.y,
               color: drawColor,
             };
+          } else if (tool === 'fib-mm') {
+            created = {
+              id: draftId,
+              kind: 'fib-mm',
+              x1: startX,
+              y1: startY,
+              x2: end.imgX,
+              y2: end.imgY,
+              color: drawColor,
+            };
           } else {
             created = {
               id: draftId,
@@ -1340,7 +1723,6 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         const cur = shapesRef.current;
         pushHistory(cur);
         setShapes([...cur, created]);
-        // Keep the newly drawn shape selected so the user can immediately tweak handles or recolor it
         setSelectedId(created.id);
       }
     };
@@ -1361,10 +1743,10 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       setShapes(finalShapes);
       setTextDraft(null);
     }
+    setFibExtDraft(null);
 
     setSaving(true);
     try {
-      // Render cleanly onto an offscreen canvas so selection outlines/handles never leak into the PNG
       const exportCanvas = document.createElement('canvas');
       exportCanvas.width = img.naturalWidth;
       exportCanvas.height = img.naturalHeight;
@@ -1391,6 +1773,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
   const switchTool = (nextTool: AnnotatorTool) => {
     if (textDraft) commitTextDraft();
+    setFibExtDraft(null);
     setTool(nextTool);
   };
 
@@ -1404,7 +1787,9 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
   const showTextSizeBar =
     Boolean(textDraft) || tool === 'text' || selectedShape?.kind === 'text';
-  const showContextBar = Boolean(selectedShape && !textDraft) || showTextSizeBar;
+  const showFibExtPrompt = tool === 'fib-ext' && !selectedShape && !textDraft;
+  const showContextBar =
+    Boolean(selectedShape && !textDraft) || showTextSizeBar || showFibExtPrompt;
 
   return (
     <div
@@ -1412,7 +1797,8 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) {
           if (textDraft) commitTextDraft();
-          else onCancel();
+          else if (fibExtDraft) setFibExtDraft(null);
+          else requestClose();
         }
       }}
     >
@@ -1420,7 +1806,6 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         className="img-annotator-toolbar"
         onMouseDown={(e) => {
           e.stopPropagation();
-          // Keep text input focused when clicking color swatches or toolbar controls
           if (textDraft) e.preventDefault();
         }}
       >
@@ -1471,6 +1856,24 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         </button>
         <button
           type="button"
+          className={`img-annotator-btn ${tool === 'fib-mm' ? 'is-active' : ''}`}
+          title="斐波那契等距目标 MM（1 / 0 / -1，拖拽两点画出一倍投射）"
+          onClick={() => switchTool('fib-mm')}
+        >
+          <Rows3 size={14} />
+          <span>MM</span>
+        </button>
+        <button
+          type="button"
+          className={`img-annotator-btn ${tool === 'fib-ext' ? 'is-active' : ''}`}
+          title="斐波那契扩展 AB=CD（0 / 1，依次点击 A、B、C 三点）"
+          onClick={() => switchTool('fib-ext')}
+        >
+          <Activity size={14} />
+          <span>AB=CD</span>
+        </button>
+        <button
+          type="button"
           className={`img-annotator-btn ${tool === 'text' ? 'is-active' : ''}`}
           title="添加或点击修改文字标注"
           onClick={() => switchTool('text')}
@@ -1510,7 +1913,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
           type="button"
           className="img-annotator-btn"
           title="取消 (Esc)"
-          onClick={onCancel}
+          onClick={requestClose}
         >
           <X size={14} />
           <span>取消</span>
@@ -1527,6 +1930,53 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         </button>
       </div>
 
+      <div
+        ref={stageRef}
+        className="img-annotator-stage"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <canvas
+          ref={canvasRef}
+          className="img-annotator-canvas"
+          style={{ cursor: canvasCursor }}
+          onMouseDown={handleCanvasMouseDown}
+          onMouseMove={handleCanvasMouseMove}
+          onDoubleClick={handleCanvasDoubleClick}
+        />
+        {textDraft && (
+          <textarea
+            ref={textInputRef}
+            className="img-annotator-text-input"
+            style={{
+              left: `${textDraft.cssX}px`,
+              top: `${textDraft.cssY}px`,
+              width: `${textDraft.initialCssWidth}px`,
+              color: textDraft.color,
+              fontSize: `${textInputFontSize}px`,
+            }}
+            rows={1}
+            placeholder="输入文字，Enter 换行"
+            value={textDraft.value}
+            onMouseDown={(e) => e.stopPropagation()}
+            onChange={(e) =>
+              setTextDraft((prev) => (prev ? { ...prev, value: e.target.value } : null))
+            }
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                commitTextDraft();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setTextDraft(null);
+              }
+            }}
+          />
+        )}
+      </div>
+
+      {/* Fixed-bottom floating contextual bar so appearing/disappearing never shifts the image */}
       {showContextBar && (
         <div
           className="img-annotator-selection-bar"
@@ -1535,6 +1985,16 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
             if (textDraft) e.preventDefault();
           }}
         >
+          {showFibExtPrompt && (
+            <span className="img-annotator-selection-hint">
+              {!fibExtDraft
+                ? 'AB=CD 扩展：依次点击第 1 点 (A)、第 2 点 (B)、第 3 点 (C)'
+                : fibExtDraft.points.length === 1
+                  ? '已定 A 点，请点击确定第 2 点 (B)（Esc 取消）'
+                  : '已定 A、B 点，请点击确定回调点 (C) 完成投射（Esc 取消）'}
+            </span>
+          )}
+
           {showTextSizeBar && (
             <>
               <span className="img-annotator-selection-label">字号</span>
@@ -1620,7 +2080,11 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
               <span className="img-annotator-selection-hint">
                 {selectedShape.kind === 'text'
                   ? '拖动移动 · 拖左右边界折行 · 双击改字'
-                  : '拖动端点/角点调整 · 拖动移动 · 点上方色块换色'}
+                  : selectedShape.kind === 'fib-ext'
+                    ? '拖动 A/B/C 三点调整 · 拖动移动 · 点上方色块换色'
+                    : selectedShape.kind === 'fib-mm'
+                      ? '拖动 1/0 两点调整 · 拖动移动 · 点上方色块换色'
+                      : '拖动端点/角点调整 · 拖动移动 · 点上方色块换色'}
               </span>
 
               <span className="img-annotator-sep" />
@@ -1639,51 +2103,53 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         </div>
       )}
 
-      <div
-        ref={stageRef}
-        className="img-annotator-stage"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <canvas
-          ref={canvasRef}
-          className="img-annotator-canvas"
-          style={{ cursor: canvasCursor }}
-          onMouseDown={handleCanvasMouseDown}
-          onMouseMove={handleCanvasMouseMove}
-          onDoubleClick={handleCanvasDoubleClick}
-        />
-        {textDraft && (
-          <textarea
-            ref={textInputRef}
-            className="img-annotator-text-input"
-            style={{
-              left: `${textDraft.cssX}px`,
-              top: `${textDraft.cssY}px`,
-              width: `${textDraft.initialCssWidth}px`,
-              color: textDraft.color,
-              fontSize: `${textInputFontSize}px`,
-            }}
-            rows={1}
-            placeholder="输入文字，Enter 换行"
-            value={textDraft.value}
+      {confirmDiscard && (
+        <div
+          className="img-annotator-confirm-backdrop"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            if (e.target === e.currentTarget) setConfirmDiscard(false);
+          }}
+        >
+          <div
+            className="confirm-dialog"
             onMouseDown={(e) => e.stopPropagation()}
-            onChange={(e) =>
-              setTextDraft((prev) => (prev ? { ...prev, value: e.target.value } : null))
-            }
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.nativeEvent.isComposing) return;
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                commitTextDraft();
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                setTextDraft(null);
-              }
-            }}
-          />
-        )}
-      </div>
+          >
+            <h2>放弃未保存的标注？</h2>
+            <p>当前图片还有未保存的标注，直接离开会丢失这些修改。</p>
+            <div className="confirm-dialog__actions">
+              <button
+                type="button"
+                className="confirm-dialog__cancel"
+                onClick={() => setConfirmDiscard(false)}
+              >
+                继续编辑
+              </button>
+              <button
+                type="button"
+                className="confirm-dialog__danger"
+                onClick={() => {
+                  setConfirmDiscard(false);
+                  onCancel();
+                }}
+              >
+                放弃离开
+              </button>
+              <button
+                type="button"
+                className="img-annotator-confirm-primary"
+                disabled={saving || !loaded}
+                onClick={() => {
+                  setConfirmDiscard(false);
+                  void handleSave();
+                }}
+              >
+                保存并离开
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

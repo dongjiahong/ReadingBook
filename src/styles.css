@@ -1139,16 +1139,22 @@ body,
 }
 
 .img-annotator-selection-bar {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 230;
+  max-width: 92vw;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
   gap: 6px;
-  padding: 4px 10px;
-  border-radius: 9px;
-  background: rgba(24, 24, 27, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  padding: 5px 12px;
+  border-radius: 10px;
+  background: rgba(24, 24, 27, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
 }
 
 .img-annotator-selection-label {
@@ -1292,6 +1298,33 @@ body,
 .img-annotator-text-input::placeholder {
   color: rgba(100, 116, 139, 0.72);
   font-weight: 500;
+}
+
+.img-annotator-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.img-annotator-confirm-primary {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 7px;
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.img-annotator-confirm-primary:hover:not(:disabled) {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
 }
 
 /* Floating Image Lightbox (no dark mask so book context stays visible behind) */
