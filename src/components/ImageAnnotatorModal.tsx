@@ -57,9 +57,11 @@ type Shape =
       y: number;
       text: string;
       color: string;
+      fontSize?: number;
+      maxWidth?: number;
     };
 
-type HandleId = 'start' | 'end' | 'nw' | 'ne' | 'sw' | 'se';
+type HandleId = 'start' | 'end' | 'nw' | 'ne' | 'sw' | 'se' | 'w' | 'e';
 
 interface HandlePoint {
   id: HandleId;
@@ -83,6 +85,9 @@ interface TextDraftState {
   cssY: number;
   value: string;
   color: string;
+  fontSize: number;
+  maxWidth?: number;
+  initialCssWidth: number;
 }
 
 const PALETTE = [
@@ -91,6 +96,15 @@ const PALETTE = [
   { name: '蓝', value: '#2563eb' },
   { name: '黄', value: '#eab308' },
 ];
+
+const TEXT_SIZES = [
+  { label: '小', base: 14 },
+  { label: '中', base: 20 },
+  { label: '大', base: 28 },
+  { label: '特大', base: 38 },
+] as const;
+
+const DEFAULT_TEXT_BASE_SIZE = 20;
 
 interface ImageAnnotatorModalProps {
   imageUrl: string;
@@ -108,11 +122,57 @@ function getStrokeScale(width: number, height: number): number {
   return Math.max(0.75, Math.min(2.2, Math.max(width, height) / 900));
 }
 
-function getTextMetrics(strokeScale: number) {
-  const fontSize = Math.max(16, Math.round(20 * strokeScale));
+function getTextMetrics(strokeScale: number, baseSize = DEFAULT_TEXT_BASE_SIZE) {
+  const fontSize = Math.max(12, Math.round(baseSize * strokeScale));
   const lineHeight = Math.round(fontSize * 1.32);
   const font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif`;
   return { fontSize, lineHeight, font };
+}
+
+function wrapTextLines(
+  ctx: CanvasRenderingContext2D | null,
+  text: string,
+  font: string,
+  fontSize: number,
+  maxWidth?: number
+): string[] {
+  const paragraphs = text.split('\n');
+  if (!maxWidth || maxWidth <= 0) return paragraphs;
+
+  const measure = (s: string) =>
+    ctx ? ctx.measureText(s).width : s.length * fontSize * 0.75;
+  if (ctx) {
+    ctx.save();
+    ctx.font = font;
+  }
+
+  const result: string[] = [];
+  for (const para of paragraphs) {
+    if (!para) {
+      result.push('');
+      continue;
+    }
+    let line = '';
+    for (const ch of para) {
+      const next = line + ch;
+      if (line.length > 0 && measure(next) > maxWidth) {
+        const lastSpace = line.lastIndexOf(' ');
+        if (lastSpace > 0 && ch !== ' ') {
+          result.push(line.slice(0, lastSpace));
+          line = line.slice(lastSpace + 1) + ch;
+        } else {
+          result.push(line);
+          line = ch === ' ' ? '' : ch;
+        }
+      } else {
+        line = next;
+      }
+    }
+    if (line.length > 0) result.push(line);
+  }
+
+  if (ctx) ctx.restore();
+  return result.length > 0 ? result : [''];
 }
 
 /** Snap endpoint to horizontal, vertical, or 45-degree angle when Shift is held. */
@@ -196,8 +256,8 @@ function getShapeBounds(
     };
   }
   // text
-  const { fontSize, lineHeight, font } = getTextMetrics(strokeScale);
-  const lines = shape.text.split('\n');
+  const { fontSize, lineHeight, font } = getTextMetrics(strokeScale, shape.fontSize);
+  const lines = wrapTextLines(ctx, shape.text, font, fontSize, shape.maxWidth);
   let maxW = fontSize;
   if (ctx) {
     ctx.save();
@@ -211,11 +271,12 @@ function getShapeBounds(
       maxW = Math.max(maxW, line.length * fontSize * 0.75);
     }
   }
+  const boxW = shape.maxWidth ? Math.max(shape.maxWidth, maxW) : maxW;
   const pad = Math.max(4, 4 * strokeScale);
   return {
     minX: shape.x - pad,
     minY: shape.y - pad,
-    maxX: shape.x + maxW + pad,
+    maxX: shape.x + boxW + pad,
     maxY: shape.y + lines.length * lineHeight + pad,
   };
 }
@@ -240,6 +301,14 @@ function getShapeHandles(
       { id: 'se', x: b.maxX, y: b.maxY },
     ];
   }
+  if (shape.kind === 'text') {
+    const b = getShapeBounds(ctx, shape, strokeScale);
+    const midY = (b.minY + b.maxY) / 2;
+    return [
+      { id: 'w', x: b.minX, y: midY },
+      { id: 'e', x: b.maxX, y: midY },
+    ];
+  }
   return [];
 }
 
@@ -255,6 +324,14 @@ function hitTestHandle(
   for (const h of handles) {
     if (Math.hypot(px - h.x, py - h.y) <= hitRadius) {
       return h.id;
+    }
+  }
+  // Allow dragging anywhere along the left/right vertical boundary of a selected text box to re-wrap
+  if (shape.kind === 'text') {
+    const b = getShapeBounds(ctx, shape, strokeScale);
+    if (py >= b.minY - hitRadius && py <= b.maxY + hitRadius) {
+      if (Math.abs(px - b.maxX) <= hitRadius * 0.85) return 'e';
+      if (Math.abs(px - b.minX) <= hitRadius * 0.85) return 'w';
     }
   }
   return null;
@@ -445,13 +522,13 @@ function drawShape(
       ctx.stroke();
     }
   } else if (shape.kind === 'text') {
-    const { lineHeight, font } = getTextMetrics(strokeScale);
+    const { fontSize, lineHeight, font } = getTextMetrics(strokeScale, shape.fontSize);
     ctx.font = font;
     ctx.textBaseline = 'top';
-    const lines = shape.text.split('\n');
+    const lines = wrapTextLines(ctx, shape.text, font, fontSize, shape.maxWidth);
     lines.forEach((line, idx) => {
       const ly = shape.y + idx * lineHeight;
-      ctx.lineWidth = Math.max(3, 4 * strokeScale);
+      ctx.lineWidth = Math.max(3, Math.round(fontSize * 0.18));
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
       ctx.strokeText(line, shape.x, ly);
       ctx.fillStyle = shape.color;
@@ -518,6 +595,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
   const [tool, setTool] = useState<AnnotatorTool>('arrow');
   const [color, setColor] = useState<string>(PALETTE[0].value);
+  const [textBaseSize, setTextBaseSize] = useState<number>(DEFAULT_TEXT_BASE_SIZE);
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [undoStack, setUndoStack] = useState<Shape[][]>([]);
   const [draftShape, setDraftShape] = useState<Shape | null>(null);
@@ -536,6 +614,11 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
   );
 
   const activeColor = textDraft?.color ?? selectedShape?.color ?? color;
+  const activeTextBaseSize =
+    textDraft?.fontSize ??
+    (selectedShape?.kind === 'text'
+      ? (selectedShape.fontSize ?? DEFAULT_TEXT_BASE_SIZE)
+      : textBaseSize);
 
   const pushHistory = useCallback((snapshot: Shape[]) => {
     setUndoStack((prev) => [...prev.slice(-49), snapshot]);
@@ -587,26 +670,29 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     };
   }, []);
 
-  const imgToStageCss = useCallback((imgX: number, imgY: number) => {
-    const canvas = canvasRef.current;
-    const stage = stageRef.current;
-    if (!canvas || !stage) return { cssX: 16, cssY: 16, fontSize: 16 };
-    const rect = canvas.getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
-    const scaleX = rect.width / canvas.width;
-    const scaleY = rect.height / canvas.height;
-    const strokeScale = getStrokeScale(canvas.width, canvas.height);
-    const { fontSize } = getTextMetrics(strokeScale);
-    const rawCssX = rect.left - stageRect.left + imgX * scaleX;
-    const rawCssY = rect.top - stageRect.top + imgY * scaleY;
-    const maxCssX = Math.max(8, stageRect.width - 176);
-    const maxCssY = Math.max(8, stageRect.height - 64);
-    return {
-      cssX: Math.min(Math.max(8, rawCssX), maxCssX),
-      cssY: Math.min(Math.max(8, rawCssY), maxCssY),
-      fontSize: Math.max(13, Math.min(28, Math.round(fontSize * scaleX))),
-    };
-  }, []);
+  const imgToStageCss = useCallback(
+    (imgX: number, imgY: number, baseSize = DEFAULT_TEXT_BASE_SIZE) => {
+      const canvas = canvasRef.current;
+      const stage = stageRef.current;
+      if (!canvas || !stage) return { cssX: 16, cssY: 16, fontSize: 16 };
+      const rect = canvas.getBoundingClientRect();
+      const stageRect = stage.getBoundingClientRect();
+      const scaleX = rect.width / canvas.width;
+      const scaleY = rect.height / canvas.height;
+      const strokeScale = getStrokeScale(canvas.width, canvas.height);
+      const { fontSize } = getTextMetrics(strokeScale, baseSize);
+      const rawCssX = rect.left - stageRect.left + imgX * scaleX;
+      const rawCssY = rect.top - stageRect.top + imgY * scaleY;
+      const maxCssX = Math.max(8, stageRect.width - 130);
+      const maxCssY = Math.max(8, stageRect.height - 44);
+      return {
+        cssX: Math.min(Math.max(8, rawCssX), maxCssX),
+        cssY: Math.min(Math.max(8, rawCssY), maxCssY),
+        fontSize: Math.max(11, Math.min(54, Math.round(fontSize * scaleX))),
+      };
+    },
+    []
+  );
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -652,13 +738,46 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       el.focus();
       const len = el.value.length;
       el.setSelectionRange(len, len);
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
     });
     return () => cancelAnimationFrame(raf);
   }, [textSessionId]);
 
+  // Auto-grow transparent textarea height as user types, wraps lines, or changes font size
+  const textDraftValue = textDraft?.value ?? '';
+  const textDraftFontSize = textDraft?.fontSize ?? DEFAULT_TEXT_BASE_SIZE;
+  useEffect(() => {
+    const el = textInputRef.current;
+    if (!el || textSessionId === null) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [textDraftValue, textDraftFontSize, textSessionId]);
+
+  const getCommittedTextMaxWidth = useCallback((draft: TextDraftState): number | undefined => {
+    const el = textInputRef.current;
+    const canvas = canvasRef.current;
+    if (el && canvas) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0) {
+        const imgPerCss = canvas.width / rect.width;
+        const cssWidth = el.offsetWidth;
+        const wasResized = Math.abs(cssWidth - draft.initialCssWidth) > 4;
+        if (wasResized || draft.maxWidth !== undefined) {
+          return Math.max(48, (cssWidth - 10) * imgPerCss);
+        }
+      }
+    }
+    return draft.maxWidth;
+  }, []);
+
   const applyTextDraftToShapes = useCallback(
-    (draft: TextDraftState, currentShapes: Shape[]): { nextShapes: Shape[]; nextSelectedId: string | null } => {
-      const trimmed = draft.value.trim();
+    (
+      draft: TextDraftState,
+      currentShapes: Shape[]
+    ): { nextShapes: Shape[]; nextSelectedId: string | null } => {
+      const trimmed = draft.value.replace(/^\s+|\s+$/g, '');
+      const committedMaxWidth = getCommittedTextMaxWidth(draft);
       if (draft.editingId) {
         if (!trimmed) {
           return {
@@ -669,7 +788,13 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         return {
           nextShapes: currentShapes.map((s) =>
             s.id === draft.editingId && s.kind === 'text'
-              ? { ...s, text: trimmed, color: draft.color }
+              ? {
+                  ...s,
+                  text: trimmed,
+                  color: draft.color,
+                  fontSize: draft.fontSize,
+                  ...(committedMaxWidth ? { maxWidth: committedMaxWidth } : {}),
+                }
               : s
           ),
           nextSelectedId: draft.editingId,
@@ -689,12 +814,14 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
             y: draft.imgY,
             text: trimmed,
             color: draft.color,
+            fontSize: draft.fontSize,
+            ...(committedMaxWidth ? { maxWidth: committedMaxWidth } : {}),
           },
         ],
         nextSelectedId: newId,
       };
     },
-    []
+    [getCommittedTextMaxWidth]
   );
 
   const commitTextDraft = useCallback(() => {
@@ -711,9 +838,17 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
   const openTextEditorForShape = useCallback(
     (shape: Extract<Shape, { kind: 'text' }>) => {
-      const pos = imgToStageCss(shape.x, shape.y);
+      const baseSize = shape.fontSize ?? DEFAULT_TEXT_BASE_SIZE;
+      const pos = imgToStageCss(shape.x, shape.y, baseSize);
+      const canvas = canvasRef.current;
+      const rect = canvas?.getBoundingClientRect();
+      const scaleX = canvas && rect && canvas.width > 0 ? rect.width / canvas.width : 1;
+      const initialCssWidth = shape.maxWidth
+        ? Math.max(110, Math.round(shape.maxWidth * scaleX) + 12)
+        : 200;
       textSessionSeqRef.current += 1;
       setSelectedId(shape.id);
+      setTextBaseSize(baseSize);
       setTextDraft({
         sessionId: textSessionSeqRef.current,
         editingId: shape.id,
@@ -723,6 +858,9 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         cssY: pos.cssY,
         value: shape.text,
         color: shape.color,
+        fontSize: baseSize,
+        maxWidth: shape.maxWidth,
+        initialCssWidth,
       });
     },
     [imgToStageCss]
@@ -750,6 +888,33 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         if (target && target.color !== nextColor) {
           pushHistory(cur);
           setShapes(cur.map((s) => (s.id === selectedId ? { ...s, color: nextColor } : s)));
+        }
+      }
+    },
+    [selectedId, textDraft, pushHistory]
+  );
+
+  const handleTextSizeSelect = useCallback(
+    (nextBaseSize: number) => {
+      setTextBaseSize(nextBaseSize);
+      if (textDraft) {
+        setTextDraft((prev) => (prev ? { ...prev, fontSize: nextBaseSize } : null));
+        return;
+      }
+      if (selectedId) {
+        const cur = shapesRef.current;
+        const target = cur.find((s) => s.id === selectedId);
+        if (
+          target &&
+          target.kind === 'text' &&
+          (target.fontSize ?? DEFAULT_TEXT_BASE_SIZE) !== nextBaseSize
+        ) {
+          pushHistory(cur);
+          setShapes(
+            cur.map((s) =>
+              s.id === selectedId && s.kind === 'text' ? { ...s, fontSize: nextBaseSize } : s
+            )
+          );
         }
       }
     },
@@ -867,6 +1032,19 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
             y: newMinY + ((pt.y - origBounds.minY) / oldH) * newH,
           })),
         };
+      } else if (origShape.kind === 'text') {
+        const pad = Math.max(4, 4 * strokeScale);
+        const { fontSize } = getTextMetrics(strokeScale, origShape.fontSize);
+        const minTextW = Math.max(48, fontSize * 2);
+        if (handleId === 'e') {
+          const nextMaxW = Math.max(minTextW, cur.imgX - origShape.x);
+          updated = { ...origShape, maxWidth: nextMaxW };
+        } else if (handleId === 'w') {
+          const rightEdge = origBounds.maxX - pad;
+          const nextX = Math.min(rightEdge - minTextW, cur.imgX);
+          const nextMaxW = Math.max(minTextW, rightEdge - nextX);
+          updated = { ...origShape, x: nextX, maxWidth: nextMaxW };
+        }
       }
 
       setShapes((prev) => prev.map((s) => (s.id === origShape.id ? updated : s)));
@@ -928,11 +1106,13 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       const h = hitTestHandle(ctx, selectedShape, pt.imgX, pt.imgY, strokeScale, handleRadius);
       if (h) {
         const cursor =
-          h === 'nw' || h === 'se'
-            ? 'nwse-resize'
-            : h === 'ne' || h === 'sw'
-              ? 'nesw-resize'
-              : 'grab';
+          h === 'w' || h === 'e'
+            ? 'ew-resize'
+            : h === 'nw' || h === 'se'
+              ? 'nwse-resize'
+              : h === 'ne' || h === 'sw'
+                ? 'nesw-resize'
+                : 'grab';
         if (hoverCursor !== cursor) setHoverCursor(cursor);
         return;
       }
@@ -1007,6 +1187,9 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       if (hit) {
         setSelectedId(hit.id);
         setColor(hit.color);
+        if (hit.kind === 'text') {
+          setTextBaseSize(hit.fontSize ?? DEFAULT_TEXT_BASE_SIZE);
+        }
         startDragMoveShape(hit, pt.imgX, pt.imgY);
       } else {
         setSelectedId(null);
@@ -1023,7 +1206,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         openTextEditorForShape(hit);
         return;
       }
-      const pos = imgToStageCss(pt.imgX, pt.imgY);
+      const pos = imgToStageCss(pt.imgX, pt.imgY, textBaseSize);
       textSessionSeqRef.current += 1;
       setSelectedId(null);
       setTextDraft({
@@ -1035,6 +1218,8 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         cssY: pos.cssY,
         value: '',
         color,
+        fontSize: textBaseSize,
+        initialCssWidth: 200,
       });
       return;
     }
@@ -1214,8 +1399,12 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     (tool === 'select' ? 'default' : tool === 'text' ? 'text' : 'crosshair');
 
   const textInputFontSize = textDraft
-    ? imgToStageCss(textDraft.imgX, textDraft.imgY).fontSize
+    ? imgToStageCss(textDraft.imgX, textDraft.imgY, textDraft.fontSize).fontSize
     : 15;
+
+  const showTextSizeBar =
+    Boolean(textDraft) || tool === 'text' || selectedShape?.kind === 'text';
+  const showContextBar = Boolean(selectedShape && !textDraft) || showTextSizeBar;
 
   return (
     <div
@@ -1338,81 +1527,115 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         </button>
       </div>
 
-      {selectedShape && !textDraft && (
+      {showContextBar && (
         <div
           className="img-annotator-selection-bar"
-          onMouseDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            if (textDraft) e.preventDefault();
+          }}
         >
-          {(selectedShape.kind === 'arrow' ||
-            selectedShape.kind === 'line' ||
-            selectedShape.kind === 'rect') && (
+          {showTextSizeBar && (
             <>
-              <span className="img-annotator-selection-label">更换形状</span>
-              <button
-                type="button"
-                className={`img-annotator-btn img-annotator-btn--compact ${
-                  selectedShape.kind === 'arrow' ? 'is-active' : ''
-                }`}
-                onClick={() => handleConvertSelectedKind('arrow')}
-              >
-                <ArrowUpRight size={13} />
-                <span>箭头</span>
-              </button>
-              <button
-                type="button"
-                className={`img-annotator-btn img-annotator-btn--compact ${
-                  selectedShape.kind === 'line' ? 'is-active' : ''
-                }`}
-                onClick={() => handleConvertSelectedKind('line')}
-              >
-                <Minus size={13} />
-                <span>线段</span>
-              </button>
-              <button
-                type="button"
-                className={`img-annotator-btn img-annotator-btn--compact ${
-                  selectedShape.kind === 'rect' ? 'is-active' : ''
-                }`}
-                onClick={() => handleConvertSelectedKind('rect')}
-              >
-                <Square size={12} />
-                <span>方框</span>
-              </button>
-              <span className="img-annotator-sep" />
+              <span className="img-annotator-selection-label">字号</span>
+              {TEXT_SIZES.map((item) => (
+                <button
+                  key={item.base}
+                  type="button"
+                  className={`img-annotator-btn img-annotator-btn--compact ${
+                    activeTextBaseSize === item.base ? 'is-active' : ''
+                  }`}
+                  onClick={() => handleTextSizeSelect(item.base)}
+                >
+                  <span>{item.label}</span>
+                </button>
+              ))}
+              {(selectedShape && !textDraft) || textDraft ? (
+                <span className="img-annotator-sep" />
+              ) : null}
             </>
           )}
 
-          {selectedShape.kind === 'text' && (
-            <>
-              <button
-                type="button"
-                className="img-annotator-btn img-annotator-btn--compact"
-                onClick={() => openTextEditorForShape(selectedShape)}
-              >
-                <Pencil size={12} />
-                <span>编辑文字</span>
-              </button>
-              <span className="img-annotator-sep" />
-            </>
+          {textDraft && (
+            <span className="img-annotator-selection-hint">
+              Enter 换行 · 拖右下角拉宽折行 · ⌘+Enter 或点空白确认
+            </span>
           )}
 
-          <span className="img-annotator-selection-hint">
-            {selectedShape.kind === 'text'
-              ? '拖动移动 · 双击改字 · 点上方色块换色'
-              : '拖动端点/角点调整 · 拖动移动 · 点上方色块换色'}
-          </span>
+          {selectedShape && !textDraft && (
+            <>
+              {(selectedShape.kind === 'arrow' ||
+                selectedShape.kind === 'line' ||
+                selectedShape.kind === 'rect') && (
+                <>
+                  <span className="img-annotator-selection-label">更换形状</span>
+                  <button
+                    type="button"
+                    className={`img-annotator-btn img-annotator-btn--compact ${
+                      selectedShape.kind === 'arrow' ? 'is-active' : ''
+                    }`}
+                    onClick={() => handleConvertSelectedKind('arrow')}
+                  >
+                    <ArrowUpRight size={13} />
+                    <span>箭头</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`img-annotator-btn img-annotator-btn--compact ${
+                      selectedShape.kind === 'line' ? 'is-active' : ''
+                    }`}
+                    onClick={() => handleConvertSelectedKind('line')}
+                  >
+                    <Minus size={13} />
+                    <span>线段</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`img-annotator-btn img-annotator-btn--compact ${
+                      selectedShape.kind === 'rect' ? 'is-active' : ''
+                    }`}
+                    onClick={() => handleConvertSelectedKind('rect')}
+                  >
+                    <Square size={12} />
+                    <span>方框</span>
+                  </button>
+                  <span className="img-annotator-sep" />
+                </>
+              )}
 
-          <span className="img-annotator-sep" />
+              {selectedShape.kind === 'text' && (
+                <>
+                  <button
+                    type="button"
+                    className="img-annotator-btn img-annotator-btn--compact"
+                    onClick={() => openTextEditorForShape(selectedShape)}
+                  >
+                    <Pencil size={12} />
+                    <span>编辑文字</span>
+                  </button>
+                  <span className="img-annotator-sep" />
+                </>
+              )}
 
-          <button
-            type="button"
-            className="img-annotator-btn img-annotator-btn--compact img-annotator-btn--danger"
-            title="删除选中标注 (Delete)"
-            onClick={handleDeleteSelected}
-          >
-            <Trash2 size={13} />
-            <span>删除</span>
-          </button>
+              <span className="img-annotator-selection-hint">
+                {selectedShape.kind === 'text'
+                  ? '拖动移动 · 拖左右边界折行 · 双击改字'
+                  : '拖动端点/角点调整 · 拖动移动 · 点上方色块换色'}
+              </span>
+
+              <span className="img-annotator-sep" />
+
+              <button
+                type="button"
+                className="img-annotator-btn img-annotator-btn--compact img-annotator-btn--danger"
+                title="删除选中标注 (Delete)"
+                onClick={handleDeleteSelected}
+              >
+                <Trash2 size={13} />
+                <span>删除</span>
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -1436,11 +1659,12 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
             style={{
               left: `${textDraft.cssX}px`,
               top: `${textDraft.cssY}px`,
+              width: `${textDraft.initialCssWidth}px`,
               color: textDraft.color,
               fontSize: `${textInputFontSize}px`,
             }}
-            rows={2}
-            placeholder="输入文字，Enter 确认 / Shift+Enter 换行"
+            rows={1}
+            placeholder="输入文字，Enter 换行"
             value={textDraft.value}
             onMouseDown={(e) => e.stopPropagation()}
             onChange={(e) =>
@@ -1448,7 +1672,8 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
             }
             onKeyDown={(e) => {
               e.stopPropagation();
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
                 commitTextDraft();
               } else if (e.key === 'Escape') {

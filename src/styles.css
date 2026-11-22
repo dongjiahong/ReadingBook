@@ -1116,13 +1116,12 @@ body,
   position: fixed;
   inset: 0;
   z-index: 220;
-  background: rgba(15, 23, 42, 0.86);
-  backdrop-filter: blur(4px);
+  background: transparent;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: 12px;
   padding: 20px;
 }
 
@@ -1259,35 +1258,48 @@ body,
   width: auto;
   height: auto;
   border-radius: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
   background: #ffffff;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.28), 0 4px 16px rgba(15, 23, 42, 0.12);
 }
 
 .img-annotator-text-input {
   position: absolute;
   z-index: 20;
-  min-width: 168px;
-  max-width: 360px;
-  padding: 5px 8px;
-  border-radius: 6px;
-  border: 1.5px solid #3b82f6;
-  background: rgba(255, 255, 255, 0.96);
+  min-width: 110px;
+  max-width: calc(100% - 16px);
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1.5px dashed rgba(59, 130, 246, 0.85);
+  background: transparent;
   font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
   font-size: 14px;
   font-weight: 600;
   line-height: 1.32;
   outline: none;
-  resize: both;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  resize: horizontal;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-shadow:
+    -1px -1px 0 rgba(255, 255, 255, 0.92),
+    1px -1px 0 rgba(255, 255, 255, 0.92),
+    -1px 1px 0 rgba(255, 255, 255, 0.92),
+    1px 1px 0 rgba(255, 255, 255, 0.92),
+    0 0 3px rgba(255, 255, 255, 0.9);
 }
 
-/* Fullscreen Image Lightbox Modal */
+.img-annotator-text-input::placeholder {
+  color: rgba(100, 116, 139, 0.72);
+  font-weight: 500;
+}
+
+/* Floating Image Lightbox (no dark mask so book context stays visible behind) */
 .image-lightbox-backdrop {
   position: fixed;
   inset: 0;
   z-index: 200;
-  background: rgba(15, 23, 42, 0.82);
-  backdrop-filter: blur(4px);
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1305,12 +1317,69 @@ body,
   }
 }
 
+.image-lightbox-frame {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 92vw;
+  max-height: 88vh;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  background: #ffffff;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.28), 0 4px 16px rgba(15, 23, 42, 0.12);
+  cursor: default;
+}
+
+.image-lightbox-actions {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-lightbox-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(24, 24, 27, 0.78);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  transition: background 0.15s, transform 0.15s;
+}
+
+.image-lightbox-action-btn:hover {
+  background: rgba(24, 24, 27, 0.94);
+  transform: scale(1.03);
+}
+
+.image-lightbox-action-btn--primary {
+  padding: 0 12px;
+  background: rgba(37, 99, 235, 0.92);
+}
+
+.image-lightbox-action-btn--primary:hover {
+  background: #1d4ed8;
+}
+
 .image-lightbox-img {
+  display: block;
   max-width: 92vw;
   max-height: 88vh;
   object-fit: contain;
-  border-radius: 8px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+  border-radius: 9px;
   background: #ffffff;
   cursor: default;
 }
@@ -1319,7 +1388,7 @@ body,
   max-width: 92vw;
   max-height: 88vh;
   overflow: auto;
-  border-radius: 8px;
+  border-radius: 9px;
   overscroll-behavior: contain;
   cursor: default;
 }
@@ -1331,44 +1400,8 @@ body,
   width: auto;
   height: auto;
   margin: 0 auto;
-  border-radius: 8px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+  border-radius: 9px;
   background: #ffffff;
-}
-
-.image-lightbox-close {
-  position: fixed;
-  top: 20px;
-  right: 24px;
-  width: 36px;
-  height: 36px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  background: rgba(15, 23, 42, 0.65);
-  color: #ffffff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background 0.15s, transform 0.15s;
-}
-
-.image-lightbox-close:hover {
-  background: rgba(15, 23, 42, 0.9);
-  transform: scale(1.06);
-}
-
-.image-lightbox-hint {
-  position: fixed;
-  bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 6px 14px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.72);
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 12px;
-  pointer-events: none;
 }
 
 /* Card Ports */

@@ -14,6 +14,7 @@ import {
   ListTree,
   Loader2,
   MessageSquarePlus,
+  Pencil,
   PlusCircle,
   Redo2,
   RotateCcw,
@@ -114,6 +115,8 @@ interface PreviewImageState {
   url: string;
   alt?: string;
   zoomable?: boolean;
+  cardId?: string;
+  image?: CardImage;
 }
 
 interface ReaderViewProps {
@@ -683,9 +686,19 @@ export default function ReaderView({
     const url = await createFullImageUrl(image);
     if (!url) return;
 
+    const ownerCard = cardsRef.current.find((c) =>
+      (c.images ?? []).some((img) => img.id === image.id)
+    );
     const current = previewImageRef.current;
     if (current) revokeObjectUrlIfBlob(current.url);
-    const next = { id: image.id, url, alt: '批注附图', zoomable: false };
+    const next: PreviewImageState = {
+      id: image.id,
+      url,
+      alt: '批注附图',
+      zoomable: false,
+      cardId: ownerCard?.id,
+      image,
+    };
     previewImageRef.current = next;
     setPreviewImage(next);
   }, []);
@@ -3025,39 +3038,56 @@ export default function ReaderView({
         />
       )}
 
-      {/* Fullscreen Image Lightbox Modal (click backdrop or press Esc to close) */}
+      {/* Floating Image Preview (transparent backdrop, direct annotate entry) */}
       {previewImage && (
         <div className="image-lightbox-backdrop" onClick={closePreviewImage}>
-          <div className="image-lightbox-hint">
-            点击任意空白处或按 Esc 键返回
-          </div>
-          <button
-            type="button"
-            className="image-lightbox-close"
-            title="关闭预览 (Esc)"
-            onClick={closePreviewImage}
+          <div
+            className="image-lightbox-frame"
+            onClick={(e) => e.stopPropagation()}
           >
-            <X size={18} />
-          </button>
-          {previewImage.zoomable ? (
-            <div
-              className="image-lightbox-stage"
-              onClick={(e) => e.stopPropagation()}
-            >
+            <div className="image-lightbox-actions">
+              {previewImage.cardId && previewImage.image && (
+                <button
+                  type="button"
+                  className="image-lightbox-action-btn image-lightbox-action-btn--primary"
+                  title="直接标注此图"
+                  onClick={() => {
+                    const { cardId, image } = previewImage;
+                    closePreviewImage();
+                    if (cardId && image) {
+                      void handleStartAnnotateImage(cardId, image);
+                    }
+                  }}
+                >
+                  <Pencil size={13} />
+                  <span>标注</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="image-lightbox-action-btn"
+                title="关闭预览 (Esc)"
+                onClick={closePreviewImage}
+              >
+                <X size={15} />
+              </button>
+            </div>
+            {previewImage.zoomable ? (
+              <div className="image-lightbox-stage">
+                <img
+                  src={previewImage.url}
+                  alt={previewImage.alt || '放大预览'}
+                  className="image-lightbox-img image-lightbox-img--zoomable"
+                />
+              </div>
+            ) : (
               <img
                 src={previewImage.url}
                 alt={previewImage.alt || '放大预览'}
-                className="image-lightbox-img image-lightbox-img--zoomable"
+                className="image-lightbox-img"
               />
-            </div>
-          ) : (
-            <img
-              src={previewImage.url}
-              alt={previewImage.alt || '放大预览'}
-              className="image-lightbox-img"
-              onClick={(e) => e.stopPropagation()}
-            />
-          )}
+            )}
+          </div>
         </div>
       )}
     </div>
