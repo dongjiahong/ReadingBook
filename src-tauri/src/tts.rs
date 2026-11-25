@@ -1,17 +1,20 @@
-use kothok_edge_tts::{init_tls, EdgeTts, Engine, TtsEvent};
+use std::sync::OnceLock;
+
+use edge_tts_rust::{EdgeTtsClient, SpeakOptions};
 use tauri::ipc::Response;
 
-fn voice_locale(voice: &str) -> &'static str {
-  if voice.starts_with("en-US") {
-    "en-US"
-  } else {
-    "zh-CN"
+static TTS_CLIENT: OnceLock<EdgeTtsClient> = OnceLock::new();
+
+fn get_client() -> Result<&'static EdgeTtsClient, String> {
+  if let Some(c) = TTS_CLIENT.get() {
+    return Ok(c);
   }
+  let created =
+    EdgeTtsClient::new().map_err(|e| format!("初始化 Edge TTS 客户端失败: {e}"))?;
+  Ok(TTS_CLIENT.get_or_init(|| created))
 }
 
-/// Online Microsoft Edge Neural TTS synthesis via `kothok-edge-tts`
-/// (tokio + rustls/ring + webpki-roots — works identically on macOS and Android
-/// without platform-verifier JNI initialization or extra voice-list locks).
+/// Online Microsoft Edge Neural TTS synthesis via `edge-tts-rust` (async, pooled WebSocket).
 #[tauri::command]
 pub async fn tts_synthesize(text: String, voice: String) -> Result<Response, String> {
   let trimmed = text.trim();
@@ -19,22 +22,21 @@ pub async fn tts_synthesize(text: String, voice: String) -> Result<Response, Str
     return Err("待朗读文本为空".into());
   }
 
-  init_tls();
-
-  let events = EdgeTts
-    .synthesize(trimmed, &voice, "+0%", voice_locale(&voice))
+  let client = get_client()?;
+  let result = client
+    .synthesize(
+      trimmed,
+      SpeakOptions {
+        voice,
+        output_format: "audio-24khz-48kbitrate-mono-mp3".into(),
+        ..SpeakOptions::default()
+      },
+    )
     .await
     .map_err(|e| format!("Edge TTS 合成失败（请检查网络/代理）: {e}"))?;
 
-  let mut audio = Vec::<u8>::with_capacity(32 * 1024);
-  for ev in events {
-    if let TtsEvent::Audio(bytes) = ev {
-      audio.extend_from_slice(&bytes);
-    }
-  }
-
-  if audio.is_empty() {
+  if result.audio.is_empty() {
     return Err("未收到语音音频数据".into());
   }
-  Ok(Response::new(audio))
+  Ok(Response::new(result.audio))
 }
