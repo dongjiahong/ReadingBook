@@ -8,6 +8,7 @@ import {
   Crop,
   Download,
   GitCommitHorizontal,
+  Headphones,
   Highlighter,
   Images,
   LayoutGrid,
@@ -35,6 +36,7 @@ import { GalleryModal } from './components/GalleryModal';
 import { ANCHOR_COLORS } from './components/SelectionPopover';
 import { ImageAnnotatorModal } from './components/ImageAnnotatorModal';
 import { SearchModal, type SearchResultAction } from './components/SearchModal';
+import { TtsPlayerBar } from './components/TtsPlayerBar';
 import {
   BookToCanvasBridge,
   type MidLineRoutingMode,
@@ -186,8 +188,24 @@ export default function ReaderView({
   const [showToc, setShowToc] = useState(false);
   const [showReviewDrawer, setShowReviewDrawer] = useState(false);
   const [showGallery, setShowGallery] = useState(false);
+  const [showTts, setShowTts] = useState(false);
+  const [ttsParagraphId, setTtsParagraphId] = useState<string | null>(null);
   const [pdfCropMode, setPdfCropMode] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+
+  useEffect(() => {
+    const bookEl = bookStickyRef.current;
+    if (!bookEl) return;
+    bookEl.querySelectorAll('[data-tts-active="true"]').forEach((el) => {
+      el.removeAttribute('data-tts-active');
+    });
+    if (ttsParagraphId) {
+      const activeEl = bookEl.querySelector<HTMLElement>(
+        `[data-paragraph-id="${ttsParagraphId}"]`
+      );
+      if (activeEl) activeEl.setAttribute('data-tts-active', 'true');
+    }
+  }, [ttsParagraphId]);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [readingProgress, setReadingProgress] = useState<number>(book.progress ?? 0);
 
@@ -2462,6 +2480,16 @@ export default function ReaderView({
           >
             <Images size={15} />
           </button>
+          {docFormat === 'epub' && (
+            <button
+              type="button"
+              className={`topbar__icon-btn ${showTts ? 'is-active' : ''}`}
+              title="离线中英文听书 (Kokoro)"
+              onClick={() => setShowTts((v) => !v)}
+            >
+              <Headphones size={15} />
+            </button>
+          )}
           <div className="topbar__doc" data-tauri-drag-region>
             <span className="topbar__title" data-tauri-drag-region>
               {bookTitle}
@@ -3027,6 +3055,36 @@ export default function ReaderView({
         paragraphs={paragraphs}
         onClose={() => setShowGallery(false)}
         onJump={handleSearchSelect}
+      />
+
+      <TtsPlayerBar
+        open={showTts}
+        bookId={book.id}
+        initialLocator={book.ttsLocator}
+        paragraphs={paragraphs}
+        onClose={() => {
+          setShowTts(false);
+          setTtsParagraphId(null);
+        }}
+        onActiveParagraphChange={(pid) => {
+          setTtsParagraphId(pid);
+          if (pid) {
+            const target = bookStickyRef.current?.querySelector<HTMLElement>(
+              `[data-paragraph-id="${pid}"]`
+            );
+            const scroller = unifiedScrollRef.current;
+            if (target && scroller) {
+              const offset =
+                target.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+              scroller.scrollTo({
+                top: Math.max(0, scroller.scrollTop + offset - 80),
+                left: scroller.scrollLeft,
+                behavior: 'smooth',
+              });
+              bumpSync();
+            }
+          }
+        }}
       />
 
       {/* Built-in Image Annotator Modal (arrows, rectangles, text) */}

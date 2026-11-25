@@ -18,6 +18,7 @@ import { GalleryModal } from './components/GalleryModal';
 import { MobileNoteSheet } from './components/MobileNoteSheet';
 import { PdfBookPane, type PdfSource } from './components/PdfBookPane';
 import { SearchModal, type SearchResultAction } from './components/SearchModal';
+import { TtsPlayerBar } from './components/TtsPlayerBar';
 import { loadAnnotations, saveAnnotations } from './services/db';
 import type {
   AnchorColor,
@@ -140,7 +141,22 @@ export default function MobileReaderView({
   const [showReviewDrawer, setShowReviewDrawer] = useState(false);
   const [showGallery, setShowGallery] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
-  const [ttsToast, setTtsToast] = useState(false);
+  const [showTts, setShowTts] = useState(false);
+  const [ttsParagraphId, setTtsParagraphId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const host = contentHostRef.current;
+    if (!host) return;
+    host.querySelectorAll('[data-tts-active="true"]').forEach((el) => {
+      el.removeAttribute('data-tts-active');
+    });
+    if (ttsParagraphId) {
+      const activeEl = host.querySelector<HTMLElement>(
+        `[data-paragraph-id="${ttsParagraphId}"]`
+      );
+      if (activeEl) activeEl.setAttribute('data-tts-active', 'true');
+    }
+  }, [ttsParagraphId]);
   const [previewImage, setPreviewImage] = useState<{ url: string; alt: string } | null>(
     null
   );
@@ -888,9 +904,20 @@ export default function MobileReaderView({
         </div>
       </div>
 
-      {ttsToast && (
-        <div className="mobile-toast">离线中英文听书引擎将在下一阶段接入</div>
-      )}
+      <TtsPlayerBar
+        open={showTts}
+        bookId={book.id}
+        initialLocator={book.ttsLocator}
+        paragraphs={paragraphs}
+        onClose={() => {
+          setShowTts(false);
+          setTtsParagraphId(null);
+        }}
+        onActiveParagraphChange={(pid) => {
+          setTtsParagraphId(pid);
+          if (pid) scrollToSelector(`[data-paragraph-id="${pid}"]`);
+        }}
+      />
 
       <nav className="mobile-bottom-bar" aria-label="阅读工具栏">
         <button
@@ -933,11 +960,8 @@ export default function MobileReaderView({
 
         <button
           type="button"
-          className="mobile-bottom-bar__item"
-          onClick={() => {
-            setTtsToast(true);
-            window.setTimeout(() => setTtsToast(false), 2000);
-          }}
+          className={`mobile-bottom-bar__item ${showTts ? 'is-active' : ''}`}
+          onClick={() => setShowTts((v) => !v)}
         >
           <Headphones size={18} />
           <span>听书</span>
