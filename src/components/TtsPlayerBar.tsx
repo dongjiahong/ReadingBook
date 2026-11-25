@@ -59,7 +59,20 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
 
   const [status, setStatus] = useState<TtsStatus | null>(null);
   const [progress, setProgress] = useState<TtsProgressEvent | null>(null);
+  const [elapsedSec, setElapsedSec] = useState<number>(0);
   const [setupError, setSetupError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!progress) {
+      setElapsedSec(0);
+      return;
+    }
+    const start = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [Boolean(progress)]);
 
   const parsedInitial = useMemo(
     () => parseTtsLocator(initialLocator),
@@ -245,9 +258,10 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
                   <Loader2 size={13} className="topbar__spinner" />
                   <span>{progress.stage}</span>
                 </span>
-                {progress.percent !== null && (
-                  <span className="tts-bar__progress-pct">{progress.percent}%</span>
-                )}
+                <span className="tts-bar__progress-pct">
+                  {progress.percent !== null ? `${progress.percent}%` : ''}
+                  {elapsedSec > 0 ? ` · ${elapsedSec}s` : ''}
+                </span>
               </div>
               <div className="tts-bar__progress-track">
                 <div
