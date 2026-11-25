@@ -260,10 +260,11 @@ fn spawn_worker(app: &AppHandle) -> Result<WorkerHandle, String> {
   }
   let script = ensure_worker_script(app)?;
 
+  let num_threads = if cfg!(target_os = "android") { "2" } else { "4" };
   let mut child = Command::new(&py)
     .arg(&script)
     .arg(&model_dir)
-    .arg("2")
+    .arg(num_threads)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::null())

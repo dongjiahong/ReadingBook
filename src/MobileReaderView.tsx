@@ -909,6 +909,19 @@ export default function MobileReaderView({
         bookId={book.id}
         initialLocator={book.ttsLocator}
         paragraphs={paragraphs}
+        getCurrentVisibleParagraphId={() => {
+          const scroller = scrollRef.current;
+          const host = contentHostRef.current;
+          if (!scroller || !host) return null;
+          const top = scroller.getBoundingClientRect().top;
+          const nodes = host.querySelectorAll<HTMLElement>('[data-paragraph-id]');
+          for (let i = 0; i < nodes.length; i += 1) {
+            if (nodes[i].getBoundingClientRect().bottom > top + 12) {
+              return nodes[i].dataset.paragraphId ?? null;
+            }
+          }
+          return null;
+        }}
         onClose={() => {
           setShowTts(false);
           setTtsParagraphId(null);

@@ -3062,6 +3062,19 @@ export default function ReaderView({
         bookId={book.id}
         initialLocator={book.ttsLocator}
         paragraphs={paragraphs}
+        getCurrentVisibleParagraphId={() => {
+          const el = unifiedScrollRef.current;
+          const bookEl = bookStickyRef.current;
+          if (!el || !bookEl) return null;
+          const top = el.getBoundingClientRect().top;
+          const nodes = bookEl.querySelectorAll<HTMLElement>('[data-paragraph-id]');
+          for (let i = 0; i < nodes.length; i += 1) {
+            if (nodes[i].getBoundingClientRect().bottom > top + 12) {
+              return nodes[i].dataset.paragraphId ?? null;
+            }
+          }
+          return null;
+        }}
         onClose={() => {
           setShowTts(false);
           setTtsParagraphId(null);

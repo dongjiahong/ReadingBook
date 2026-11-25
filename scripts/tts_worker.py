@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Resident offline TTS worker for ReadingBook using sherpa-onnx (Kokoro v1.1-zh int8).
+Resident offline TTS worker for ReadingBook using sherpa-onnx (Kokoro v1.1-zh).
 
 Protocol (JSON Lines over stdin/stdout):
   Request : {"id": 1, "text": "Hello 世界", "sid": 45, "speed": 1.0}
@@ -14,41 +14,49 @@ import base64
 import io
 import json
 import math
-import os
-import struct
 import sys
 import wave
+from array import array
 from pathlib import Path
 
 
 def encode_wav_pcm16(samples, sample_rate: int) -> bytes:
-    """Sanitize NaN/Inf samples and encode float [-1, 1] samples into 16-bit PCM WAV."""
+    """Fast PCM16 WAV encoding with NaN/Inf sanitization (uses numpy if available)."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(int(sample_rate))
-        pcm = bytearray(len(samples) * 2)
-        pack_into = struct.pack_into
-        for i, s in enumerate(samples):
-            v = float(s)
-            if not math.isfinite(v):
-                v = 0.0
-            elif v > 1.0:
-                v = 1.0
-            elif v < -1.0:
-                v = -1.0
-            pack_into("<h", pcm, i * 2, int(v * 32767.0))
-        wf.writeframes(pcm)
+        try:
+            import numpy as np  # type: ignore
+
+            arr = np.asarray(samples, dtype=np.float32)
+            arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=-1.0)
+            np.clip(arr, -1.0, 1.0, out=arr)
+            wf.writeframes((arr * 32767.0).astype("<i2").tobytes())
+        except Exception:
+            pcm_arr = array(
+                "h",
+                (
+                    int(max(-1.0, min(1.0, float(s))) * 32767.0)
+                    if math.isfinite(float(s))
+                    else 0
+                    for s in samples
+                ),
+            )
+            if sys.byteorder != "little":
+                pcm_arr.byteswap()
+            wf.writeframes(pcm_arr.tobytes())
     return buf.getvalue()
 
 
-def build_tts(model_dir: Path, num_threads: int = 2):
+def build_tts(model_dir: Path, num_threads: int = 4):
     import sherpa_onnx  # type: ignore
 
-    model_onnx = model_dir / "model.int8.onnx"
+    # Prefer fp32 model.onnx when present (avoids int8 STFT quantization artifacts on arm64)
+    model_onnx = model_dir / "model.onnx"
     if not model_onnx.is_file():
-        model_onnx = model_dir / "model.onnx"
+        model_onnx = model_dir / "model.int8.onnx"
     if not model_onnx.is_file():
         raise FileNotFoundError(f"Kokoro ONNX model not found in {model_dir}")
 
@@ -94,7 +102,7 @@ def main() -> int:
         return 1
 
     model_dir = Path(sys.argv[1])
-    num_threads = int(sys.argv[2]) if len(sys.argv) >= 3 else 2
+    num_threads = int(sys.argv[2]) if len(sys.argv) >= 3 else 4
 
     try:
         tts = build_tts(model_dir, num_threads=num_threads)

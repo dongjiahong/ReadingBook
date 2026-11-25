@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
+  Crosshair,
   Download,
   Headphones,
   Loader2,
@@ -38,6 +39,7 @@ interface TtsPlayerBarProps {
   bookId: string;
   initialLocator?: string | null;
   paragraphs: BookParagraph[];
+  getCurrentVisibleParagraphId?: () => string | null;
   onClose: () => void;
   onActiveParagraphChange?: (paragraphId: string | null) => void;
 }
@@ -49,6 +51,7 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
   bookId,
   initialLocator,
   paragraphs,
+  getCurrentVisibleParagraphId,
   onClose,
   onActiveParagraphChange,
 }) => {
@@ -100,6 +103,21 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
   const controllerRef = useRef<SentenceTtsController | null>(null);
   const onActiveParaRef = useRef(onActiveParagraphChange);
   onActiveParaRef.current = onActiveParagraphChange;
+  const getVisibleParaRef = useRef(getCurrentVisibleParagraphId);
+  getVisibleParaRef.current = getCurrentVisibleParagraphId;
+
+  const findStartIndexForParagraph = useCallback(
+    (pid: string | null): number => {
+      if (!pid) return -1;
+      const exactIdx = sentences.findIndex((s) => s.paragraphId === pid);
+      if (exactIdx >= 0) return exactIdx;
+      const paraOrder = new Map(paragraphs.map((p, i) => [p.id, i]));
+      const targetOrder = paraOrder.get(pid);
+      if (targetOrder === undefined) return -1;
+      return sentences.findIndex((s) => (paraOrder.get(s.paragraphId) ?? -1) >= targetOrder);
+    },
+    [paragraphs, sentences]
+  );
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -152,8 +170,13 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
       }
     });
 
+    // Align TTS opening position with the user's current visible reading paragraph first.
     let startIdx = 0;
-    if (parsedInitial) {
+    const visiblePid = getVisibleParaRef.current?.() ?? null;
+    const fromVisible = findStartIndexForParagraph(visiblePid);
+    if (fromVisible >= 0) {
+      startIdx = fromVisible;
+    } else if (parsedInitial) {
       const found = sentences.findIndex(
         (s) =>
           s.paragraphId === parsedInitial.paragraphId &&
@@ -357,6 +380,24 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
               >
                 <SkipForward size={15} />
               </button>
+
+              {getCurrentVisibleParagraphId && (
+                <button
+                  type="button"
+                  className="tts-bar__icon-btn"
+                  title="从当前阅读位置开始朗读"
+                  onClick={() => {
+                    const idx = findStartIndexForParagraph(
+                      getVisibleParaRef.current?.() ?? null
+                    );
+                    if (idx >= 0) {
+                      void controllerRef.current?.play(idx);
+                    }
+                  }}
+                >
+                  <Crosshair size={14} />
+                </button>
+              )}
             </div>
 
             <div className="tts-bar__options">
