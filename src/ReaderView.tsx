@@ -2484,7 +2484,7 @@ export default function ReaderView({
             <button
               type="button"
               className={`topbar__icon-btn ${showTts ? 'is-active' : ''}`}
-              title="离线中英文听书 (Kokoro)"
+              title="在线听书 (Edge Neural TTS)"
               onClick={() => setShowTts((v) => !v)}
             >
               <Headphones size={15} />

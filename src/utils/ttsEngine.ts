@@ -1,5 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { BookParagraph } from '../types';
+import {
+  buildTtsCacheKey,
+  getCachedTtsBlob,
+  markTtsChunkPlayed,
+  pruneExpiredTtsCache,
+  putCachedTtsBlob,
+} from './ttsCache';
 
 export interface TtsSentence {
   index: number;
@@ -39,7 +46,6 @@ const SENTENCE_SPLIT_RE = /[^。！？；.!?\n]+[。！？；.!?\n]?/g;
 const TARGET_CHUNK_CHARS = 160;
 const MAX_CHUNK_CHARS = 260;
 const PREFETCH_AHEAD = 20;
-const KEEP_BEHIND = 5;
 
 function splitParagraphIntoChunks(raw: string): string[] {
   const cleaned = raw.replace(/\s+/g, ' ').trim();
@@ -137,11 +143,13 @@ export function parseTtsLocator(raw: string | null | undefined): TtsLocator | nu
 /**
  * Online Edge Neural TTS controller:
  * - Fetches 24kHz MP3 chunks via pure-Rust `msedge-tts` (`tts_synthesize`).
- * - Maintains a 20-chunk lookahead buffer + 5-chunk lookback cache (~1.2 MB total)
- *   for instant gapless playback and instant replay even on flaky networks.
+ * - Persists up to 20 lookahead chunks in IndexedDB (`ttsCache.ts`):
+ *   unplayed chunks stay cached across sessions; played chunks auto-expire after 2 hours.
+ * - Immediately revokes in-memory Blob URLs after playback to keep RAM flat.
  * - Adjusts speed (0.85x–2.5x) instantaneously on HTMLAudioElement with pitch preservation.
  */
 export class SentenceTtsController {
+  private bookId: string;
   private sentences: TtsSentence[] = [];
   private currentIndex = 0;
   private voice = DEFAULT_EDGE_VOICE;
@@ -150,9 +158,10 @@ export class SentenceTtsController {
   private generation = 0;
 
   private audio: HTMLAudioElement | null = null;
-  private cache = new Map<number, string>();
-  private inflight = new Map<number, Promise<string | null>>();
+  private activeAudioUrl: string | null = null;
+  private inflight = new Map<string, Promise<Blob | null>>();
   private prefetchRunning = false;
+  private pruneTimer: number | null = null;
 
   private onStateChange: (state: {
     playing: boolean;
@@ -163,13 +172,23 @@ export class SentenceTtsController {
     error: string | null;
   }) => void;
 
-  constructor(onStateChange: SentenceTtsController['onStateChange']) {
+  constructor(
+    bookId: string,
+    onStateChange: SentenceTtsController['onStateChange']
+  ) {
+    this.bookId = bookId;
     this.onStateChange = onStateChange;
+    // Prune any >2h played chunks on startup and periodically every 10 min
+    void pruneExpiredTtsCache();
+    this.pruneTimer = window.setInterval(() => {
+      void pruneExpiredTtsCache();
+    }, 10 * 60 * 1000);
   }
 
   setSentences(sentences: TtsSentence[], startIndex = 0): void {
     this.stopPlaybackOnly();
-    this.clearCache();
+    this.inflight.clear();
+    this.prefetchRunning = false;
     this.sentences = sentences;
     this.currentIndex = Math.max(0, Math.min(startIndex, Math.max(0, sentences.length - 1)));
     this.emit(false, null);
@@ -181,7 +200,8 @@ export class SentenceTtsController {
     const wasPlaying = this.playing;
     this.generation += 1;
     this.stopPlaybackOnly();
-    this.clearCache();
+    this.inflight.clear();
+    this.prefetchRunning = false;
     if (wasPlaying) {
       void this.play();
     } else {
@@ -242,7 +262,12 @@ export class SentenceTtsController {
     this.playing = false;
     this.generation += 1;
     this.stopPlaybackOnly();
-    this.clearCache();
+    this.inflight.clear();
+    this.prefetchRunning = false;
+    if (this.pruneTimer !== null) {
+      window.clearInterval(this.pruneTimer);
+      this.pruneTimer = null;
+    }
   }
 
   private stopPlaybackOnly(): void {
@@ -253,56 +278,51 @@ export class SentenceTtsController {
       this.audio.src = '';
       this.audio = null;
     }
-  }
-
-  private clearCache(): void {
-    for (const url of this.cache.values()) {
-      URL.revokeObjectURL(url);
-    }
-    this.cache.clear();
-    this.inflight.clear();
-    this.prefetchRunning = false;
-  }
-
-  private evictOutsideWindow(centerIndex: number): void {
-    const minKeep = Math.max(0, centerIndex - KEEP_BEHIND);
-    const maxKeep = centerIndex + PREFETCH_AHEAD + 2;
-    for (const [idx, url] of this.cache.entries()) {
-      if (idx < minKeep || idx > maxKeep) {
-        URL.revokeObjectURL(url);
-        this.cache.delete(idx);
-      }
+    if (this.activeAudioUrl) {
+      URL.revokeObjectURL(this.activeAudioUrl);
+      this.activeAudioUrl = null;
     }
   }
 
-  private fetchChunk(index: number, gen: number): Promise<string | null> {
-    if (index < 0 || index >= this.sentences.length) return Promise.resolve(null);
-    const cached = this.cache.get(index);
-    if (cached) return Promise.resolve(cached);
+  private keyFor(sentence: TtsSentence): string {
+    return buildTtsCacheKey(
+      this.bookId,
+      this.voice,
+      sentence.paragraphId,
+      sentence.sentenceInParagraph
+    );
+  }
 
-    const existing = this.inflight.get(index);
+  private async ensureChunkBlob(index: number, gen: number): Promise<Blob | null> {
+    if (index < 0 || index >= this.sentences.length) return null;
+    const sentence = this.sentences[index];
+    const key = this.keyFor(sentence);
+
+    const cached = await getCachedTtsBlob(key);
+    if (cached) return cached;
+
+    const existing = this.inflight.get(key);
     if (existing) return existing;
 
-    const sentence = this.sentences[index];
     const voice = this.voice;
+    const bookId = this.bookId;
 
     const promise = invoke<ArrayBuffer>('tts_synthesize', {
       text: sentence.text,
       voice,
     })
-      .then((mp3Buffer) => {
-        if (gen !== this.generation) return null;
-        const url = URL.createObjectURL(new Blob([mp3Buffer], { type: 'audio/mpeg' }));
-        this.cache.set(index, url);
-        return url;
+      .then(async (mp3Buffer) => {
+        const blob = new Blob([mp3Buffer], { type: 'audio/mpeg' });
+        await putCachedTtsBlob(key, bookId, voice, blob);
+        return gen === this.generation ? blob : null;
       })
       .finally(() => {
-        if (this.inflight.get(index) === promise) {
-          this.inflight.delete(index);
+        if (this.inflight.get(key) === promise) {
+          this.inflight.delete(key);
         }
       });
 
-    this.inflight.set(index, promise);
+    this.inflight.set(key, promise);
     return promise;
   }
 
@@ -313,22 +333,24 @@ export class SentenceTtsController {
     void (async () => {
       try {
         while (gen === this.generation && this.playing) {
-          let nextMissing = -1;
           const maxIdx = Math.min(
             this.sentences.length - 1,
             this.currentIndex + PREFETCH_AHEAD
           );
+          let nextMissing = -1;
           for (let i = this.currentIndex + 1; i <= maxIdx; i += 1) {
-            if (!this.cache.has(i) && !this.inflight.has(i)) {
+            const key = this.keyFor(this.sentences[i]);
+            if (this.inflight.has(key)) continue;
+            const hit = await getCachedTtsBlob(key);
+            if (!hit) {
               nextMissing = i;
               break;
             }
           }
           if (nextMissing === -1) break;
           try {
-            await this.fetchChunk(nextMissing, gen);
+            await this.ensureChunkBlob(nextMissing, gen);
           } catch {
-            // Stop prefetching on transient network error; playback will retry when reached
             break;
           }
         }
@@ -347,12 +369,13 @@ export class SentenceTtsController {
     }
 
     this.currentIndex = index;
-    this.evictOutsideWindow(index);
-    this.emit(!this.cache.has(index), null);
+    const sentence = this.sentences[index];
+    const cacheKey = this.keyFor(sentence);
+    this.emit(true, null);
 
-    let url: string | null = null;
+    let blob: Blob | null = null;
     try {
-      url = await this.fetchChunk(index, gen);
+      blob = await this.ensureChunkBlob(index, gen);
     } catch (err) {
       if (gen !== this.generation) return;
       this.playing = false;
@@ -360,10 +383,13 @@ export class SentenceTtsController {
       return;
     }
 
-    if (gen !== this.generation || !this.playing || !url) return;
+    if (gen !== this.generation || !this.playing || !blob) return;
 
     this.pumpPrefetchLoop(gen);
     this.stopPlaybackOnly();
+
+    const url = URL.createObjectURL(blob);
+    this.activeAudioUrl = url;
 
     const audio = new Audio(url);
     audio.playbackRate = this.speed;
@@ -373,6 +399,9 @@ export class SentenceTtsController {
 
     audio.onended = () => {
       if (gen !== this.generation || !this.playing) return;
+      // Stamp playedAt so this chunk auto-deletes 2 hours after playback;
+      // unplayed prefetched chunks remain untouched.
+      void markTtsChunkPlayed(cacheKey).then(() => pruneExpiredTtsCache());
       if (index + 1 < this.sentences.length) {
         void this.playIndex(index + 1, gen);
       } else {

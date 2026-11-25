@@ -100,7 +100,7 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
       return;
     }
 
-    const ctrl = new SentenceTtsController((next) => {
+    const ctrl = new SentenceTtsController(bookId, (next) => {
       setPlayState(next);
       onActiveParaRef.current?.(
         next.playing && next.sentence ? next.sentence.paragraphId : null
