@@ -1643,11 +1643,22 @@ body,
   padding: 26px 32px 64px;
 }
 
+.shelf__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 14px 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
 .shelf__grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
   gap: 24px 18px;
-  max-width: 1120px;
+  width: 100%;
 }
 
 .shelf__notice,
@@ -2725,16 +2736,16 @@ body,
 
 /* ---------- Bookshelf Continue-Reading Hero & Book Spine Sheen ---------- */
 .shelf-hero {
-  max-width: 1120px;
-  margin-bottom: 26px;
-  padding: 18px 22px;
+  width: 100%;
+  margin-bottom: 24px;
+  padding: 20px 24px;
   border-radius: 14px;
-  background: var(--bg-surface);
+  background: linear-gradient(135deg, var(--bg-surface) 0%, var(--bg-subtle) 100%);
   border: 1px solid var(--border-subtle);
-  box-shadow: 0 6px 22px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.05);
   display: flex;
   align-items: center;
-  gap: 20px;
+  gap: 22px;
   cursor: pointer;
   transition: transform 0.16s, box-shadow 0.16s, border-color 0.16s;
 }
@@ -2742,19 +2753,19 @@ body,
 .shelf-hero:hover {
   transform: translateY(-1px);
   border-color: var(--border-strong);
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.1);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.09);
 }
 
 .shelf-hero__cover {
   position: relative;
-  width: 78px;
+  width: 82px;
   aspect-ratio: 2 / 3;
-  border-radius: 6px;
+  border-radius: 7px;
   overflow: hidden;
   flex-shrink: 0;
   background: var(--bg-subtle);
   border: 1px solid var(--border-subtle);
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.14);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.14);
 }
 
 .shelf-hero__cover img {
@@ -2788,17 +2799,34 @@ body,
   gap: 6px;
 }
 
+.shelf-hero__eyebrow-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .shelf-hero__eyebrow {
   font-size: 11px;
   font-weight: 600;
   color: #2563eb;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+}
+
+.shelf-hero__format-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
 }
 
 .shelf-hero__title {
   margin: 0;
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--text-strong);
   white-space: nowrap;
   overflow: hidden;
@@ -2806,40 +2834,24 @@ body,
 }
 
 .shelf-hero__author {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-muted);
-}
-
-.shelf-hero__stats {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 2px;
-}
-
-.shelf-hero__stat {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11.5px;
-  color: var(--text-muted);
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .shelf-hero__progress-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 4px;
-  max-width: 340px;
+  gap: 12px;
+  margin-top: 8px;
+  width: 100%;
 }
 
 .shelf-hero__progress-bar {
   flex: 1;
-  height: 5px;
+  height: 6px;
   border-radius: 999px;
   background: var(--border-subtle);
   overflow: hidden;
@@ -2849,7 +2861,7 @@ body,
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: #3b82f6;
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
 }
 
 .shelf-hero__progress-text {
@@ -2857,19 +2869,61 @@ body,
   font-weight: 600;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.shelf-hero__right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding-left: 22px;
+  border-left: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.shelf-hero__metrics {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.shelf-hero__metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 44px;
+}
+
+.shelf-hero__metric-num {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.shelf-hero__metric-label {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .shelf-hero__cta {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 14px;
+  padding: 9px 16px;
   border-radius: 9px;
   background: var(--text-main);
   color: var(--bg-surface);
   font-size: 12.5px;
   font-weight: 500;
   flex-shrink: 0;
+  transition: opacity 0.15s;
+}
+
+.shelf-hero:hover .shelf-hero__cta {
+  opacity: 0.9;
 }
 
 /* ---------- K-Line Chart Review Gallery & Flashcard Modal ---------- */

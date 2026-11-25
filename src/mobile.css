@@ -460,20 +460,39 @@
 
   .shelf-hero {
     padding: 14px;
-    gap: 14px;
+    gap: 12px;
     margin-bottom: 18px;
+    flex-wrap: wrap;
   }
 
   .shelf-hero__cover {
-    width: 62px;
+    width: 60px;
   }
 
   .shelf-hero__title {
     font-size: 15px;
   }
 
+  .shelf-hero__right {
+    width: 100%;
+    padding-left: 0;
+    padding-top: 10px;
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
+    justify-content: space-between;
+  }
+
+  .shelf-hero__metrics {
+    gap: 14px;
+  }
+
+  .shelf-hero__metric-num {
+    font-size: 14px;
+  }
+
   .shelf-hero__cta {
-    display: none;
+    padding: 6px 12px;
+    font-size: 12px;
   }
 
   .shelf__grid {

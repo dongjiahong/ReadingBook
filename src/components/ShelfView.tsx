@@ -2,11 +2,9 @@ import React, { useEffect, useState } from 'react';
 import {
   ArrowRight,
   BookOpen,
-  Image as ImageIcon,
   Loader2,
   Plus,
   Settings,
-  StickyNote,
   Trash2,
 } from 'lucide-react';
 import { loadAllBookAnnotations } from '../services/db';
@@ -119,6 +117,12 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
           />
         )}
 
+        {books.length > 0 && (
+          <div className="shelf__section-head">
+            <span>全部书籍</span>
+          </div>
+        )}
+
         <div className="shelf__grid">
           {books.map((book) => (
             <BookCard
@@ -208,35 +212,44 @@ const ContinueReadingHero: React.FC<ContinueReadingHeroProps> = ({
       </div>
 
       <div className="shelf-hero__content">
-        <span className="shelf-hero__eyebrow">继续阅读</span>
+        <div className="shelf-hero__eyebrow-row">
+          <span className="shelf-hero__eyebrow">继续阅读</span>
+          <span className="shelf-hero__format-badge">{book.format.toUpperCase()}</span>
+        </div>
         <h2 className="shelf-hero__title">{book.title}</h2>
-        <div className="shelf-hero__author">
-          {book.author || '未知作者'} · {book.format.toUpperCase()}
-        </div>
-
-        <div className="shelf-hero__stats">
-          <span className="shelf-hero__stat">
-            <StickyNote size={12} />
-            <span>{stats?.cards ?? 0} 张批注卡</span>
-          </span>
-          <span className="shelf-hero__stat">
-            <ImageIcon size={12} />
-            <span>{stats?.images ?? 0} 张图表</span>
-          </span>
-        </div>
+        <div className="shelf-hero__author">{book.author || '未知作者'}</div>
 
         <div className="shelf-hero__progress-row">
           <div className="shelf-hero__progress-bar">
             <span style={{ width: `${Math.min(100, percent)}%` }} />
           </div>
-          <span className="shelf-hero__progress-text">{percent}%</span>
+          <span className="shelf-hero__progress-text">
+            {percent > 0 ? `已读 ${percent}%` : '刚开读 · 0%'}
+          </span>
         </div>
       </div>
 
-      <span className="shelf-hero__cta">
-        <span>继续阅读</span>
-        <ArrowRight size={14} />
-      </span>
+      <div className="shelf-hero__right">
+        <div className="shelf-hero__metrics">
+          <div className="shelf-hero__metric">
+            <span className="shelf-hero__metric-num">{stats?.anchors ?? 0}</span>
+            <span className="shelf-hero__metric-label">高亮</span>
+          </div>
+          <div className="shelf-hero__metric">
+            <span className="shelf-hero__metric-num">{stats?.cards ?? 0}</span>
+            <span className="shelf-hero__metric-label">批注卡</span>
+          </div>
+          <div className="shelf-hero__metric">
+            <span className="shelf-hero__metric-num">{stats?.images ?? 0}</span>
+            <span className="shelf-hero__metric-label">图表</span>
+          </div>
+        </div>
+
+        <span className="shelf-hero__cta">
+          <span>继续阅读</span>
+          <ArrowRight size={14} />
+        </span>
+      </div>
     </section>
   );
 };
