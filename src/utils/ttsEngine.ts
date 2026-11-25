@@ -1,15 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { BookParagraph } from '../types';
 
-export interface TtsStatus {
-  runtimeReady: boolean;
-  modelReady: boolean;
-  modelId: string;
-  modelDir: string;
-  pythonPath: string | null;
-  workerRunning: boolean;
-}
-
 export interface TtsSentence {
   index: number;
   paragraphId: string;
@@ -20,59 +11,78 @@ export interface TtsSentence {
 export interface TtsLocator {
   paragraphId: string;
   sentenceInParagraph: number;
-  speakerId?: number;
+  voice?: string;
   speed?: number;
 }
 
 export interface TtsVoicePreset {
-  id: number;
+  id: string;
   label: string;
   lang: 'zh' | 'en';
 }
 
-/** Curated Kokoro v1.1-zh (103 speakers) voice presets covering ZH + EN. */
-export const KOKORO_VOICES: TtsVoicePreset[] = [
-  { id: 45, label: '中文女声 · 柔和 (zf_001)', lang: 'zh' },
-  { id: 46, label: '中文女声 · 清晰 (zf_002)', lang: 'zh' },
-  { id: 50, label: '中文女声 · 知性 (zf_006)', lang: 'zh' },
-  { id: 85, label: '中文男声 · 沉稳 (zm_009)', lang: 'zh' },
-  { id: 90, label: '中文男声 · 播音 (zm_014)', lang: 'zh' },
-  { id: 0, label: 'English · Heart (af_maple)', lang: 'en' },
-  { id: 3, label: 'English · Alloy (af_sol)', lang: 'en' },
+/** Top 3 community-favorite female + top 3 male Edge Neural voices (ZH + Bilingual). */
+export const EDGE_VOICES: TtsVoicePreset[] = [
+  // 女声 Top 3
+  { id: 'zh-CN-XiaoxiaoNeural', label: '女 · 晓晓（温暖自然）', lang: 'zh' },
+  { id: 'zh-CN-XiaoyiNeural', label: '女 · 晓伊（柔和耐听）', lang: 'zh' },
+  { id: 'en-US-AvaMultilingualNeural', label: '女 · Ava（中英双语）', lang: 'en' },
+  // 男声 Top 3
+  { id: 'zh-CN-YunxiNeural', label: '男 · 云希（清朗故事）', lang: 'zh' },
+  { id: 'zh-CN-YunjianNeural', label: '男 · 云健（沉稳播音）', lang: 'zh' },
+  { id: 'en-US-AndrewMultilingualNeural', label: '男 · Andrew（中英双语）', lang: 'en' },
 ];
 
-const SENTENCE_SPLIT_RE = /[^。！？；.!?\n]+[。！？；.!?\n]?/g;
-const MAX_SENTENCE_CHARS = 72;
+export const DEFAULT_EDGE_VOICE = EDGE_VOICES[0].id;
 
-function splitTextIntoSentences(raw: string): string[] {
+const SENTENCE_SPLIT_RE = /[^。！？；.!?\n]+[。！？；.!?\n]?/g;
+const TARGET_CHUNK_CHARS = 160;
+const MAX_CHUNK_CHARS = 260;
+const PREFETCH_AHEAD = 20;
+const KEEP_BEHIND = 5;
+
+function splitParagraphIntoChunks(raw: string): string[] {
   const cleaned = raw.replace(/\s+/g, ' ').trim();
   if (!cleaned) return [];
+  if (cleaned.length <= TARGET_CHUNK_CHARS) return [cleaned];
 
-  const chunks = cleaned.match(SENTENCE_SPLIT_RE) ?? [cleaned];
-  const result: string[] = [];
+  const rawSentences = (cleaned.match(SENTENCE_SPLIT_RE) ?? [cleaned])
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  for (const chunk of chunks) {
-    const part = chunk.trim();
-    if (!part) continue;
-    if (part.length <= MAX_SENTENCE_CHARS) {
-      result.push(part);
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const sent of rawSentences) {
+    if (sent.length > MAX_CHUNK_CHARS) {
+      if (current) {
+        chunks.push(current);
+        current = '';
+      }
+      const subParts = sent.split(/(?<=[，,、：:])/);
+      let subBuf = '';
+      for (const sub of subParts) {
+        if (subBuf.length + sub.length > MAX_CHUNK_CHARS && subBuf.trim()) {
+          chunks.push(subBuf.trim());
+          subBuf = sub;
+        } else {
+          subBuf += sub;
+        }
+      }
+      if (subBuf.trim()) chunks.push(subBuf.trim());
       continue;
     }
-    // Further split very long clauses by commas so mobile/CPU synthesis stays snappy
-    const subParts = part.split(/(?<=[，,、：:])/);
-    let buf = '';
-    for (const sub of subParts) {
-      if (buf.length + sub.length > MAX_SENTENCE_CHARS && buf.trim()) {
-        result.push(buf.trim());
-        buf = sub;
-      } else {
-        buf += sub;
-      }
+
+    if (current && current.length + sent.length > TARGET_CHUNK_CHARS) {
+      chunks.push(current);
+      current = sent;
+    } else {
+      current = current ? `${current} ${sent}` : sent;
     }
-    if (buf.trim()) result.push(buf.trim());
   }
 
-  return result;
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 export function buildSentencesFromParagraphs(paragraphs: BookParagraph[]): TtsSentence[] {
@@ -81,7 +91,7 @@ export function buildSentencesFromParagraphs(paragraphs: BookParagraph[]): TtsSe
     if (p.type === 'image' || p.type === 'table') continue;
     if (p.type === 'quote' && p.lines) {
       for (const line of p.lines) {
-        const parts = splitTextIntoSentences(line.text);
+        const parts = splitParagraphIntoChunks(line.text);
         parts.forEach((text, i) => {
           list.push({
             index: list.length,
@@ -94,7 +104,7 @@ export function buildSentencesFromParagraphs(paragraphs: BookParagraph[]): TtsSe
       continue;
     }
     if (p.text) {
-      const parts = splitTextIntoSentences(p.text);
+      const parts = splitParagraphIntoChunks(p.text);
       parts.forEach((text, i) => {
         list.push({
           index: list.length,
@@ -116,7 +126,7 @@ export function parseTtsLocator(raw: string | null | undefined): TtsLocator | nu
     return {
       paragraphId: parsed.paragraphId,
       sentenceInParagraph: Number(parsed.sentenceInParagraph) || 0,
-      speakerId: typeof parsed.speakerId === 'number' ? parsed.speakerId : undefined,
+      voice: typeof parsed.voice === 'string' ? parsed.voice : undefined,
       speed: typeof parsed.speed === 'number' ? parsed.speed : undefined,
     };
   } catch {
@@ -124,55 +134,25 @@ export function parseTtsLocator(raw: string | null | undefined): TtsLocator | nu
   }
 }
 
-export async function getTtsStatus(): Promise<TtsStatus> {
-  return invoke<TtsStatus>('tts_status');
-}
-
-export async function setupTtsRuntime(): Promise<string> {
-  return invoke<string>('tts_setup_runtime');
-}
-
-export async function downloadTtsModel(): Promise<string> {
-  return invoke<string>('tts_download_model');
-}
-
-export async function stopTtsWorker(): Promise<void> {
-  await invoke('tts_stop_worker').catch(() => {});
-}
-
-function base64ToWavUrl(b64: string): string {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  const blob = new Blob([bytes], { type: 'audio/wav' });
-  return URL.createObjectURL(blob);
-}
-
-export interface TtsSynthResponse {
-  wavB64: string;
-  sampleRate: number;
-}
-
 /**
- * Sliding-window sentence TTS player:
- * - Synthesizes the current sentence and pre-fetches up to 2 sentences ahead.
- * - Serializes synthesis requests so CPU stays cool (num_threads=2 in worker).
- * - Revokes played Blob URLs immediately to keep memory flat.
+ * Online Edge Neural TTS controller:
+ * - Fetches 24kHz MP3 chunks via pure-Rust `msedge-tts` (`tts_synthesize`).
+ * - Maintains a 20-chunk lookahead buffer + 5-chunk lookback cache (~1.2 MB total)
+ *   for instant gapless playback and instant replay even on flaky networks.
+ * - Adjusts speed (0.85x–2.5x) instantaneously on HTMLAudioElement with pitch preservation.
  */
 export class SentenceTtsController {
   private sentences: TtsSentence[] = [];
   private currentIndex = 0;
-  private speakerId = 45;
+  private voice = DEFAULT_EDGE_VOICE;
   private speed = 1.0;
   private playing = false;
   private generation = 0;
 
   private audio: HTMLAudioElement | null = null;
   private cache = new Map<number, string>();
-  private synthQueue: Promise<void> = Promise.resolve();
-  private inflight = new Set<number>();
+  private inflight = new Map<number, Promise<string | null>>();
+  private prefetchRunning = false;
 
   private onStateChange: (state: {
     playing: boolean;
@@ -183,9 +163,7 @@ export class SentenceTtsController {
     error: string | null;
   }) => void;
 
-  constructor(
-    onStateChange: SentenceTtsController['onStateChange']
-  ) {
+  constructor(onStateChange: SentenceTtsController['onStateChange']) {
     this.onStateChange = onStateChange;
   }
 
@@ -197,9 +175,9 @@ export class SentenceTtsController {
     this.emit(false, null);
   }
 
-  setVoice(speakerId: number): void {
-    if (this.speakerId === speakerId) return;
-    this.speakerId = speakerId;
+  setVoice(voice: string): void {
+    if (this.voice === voice) return;
+    this.voice = voice;
     const wasPlaying = this.playing;
     this.generation += 1;
     this.stopPlaybackOnly();
@@ -214,23 +192,11 @@ export class SentenceTtsController {
   setSpeed(speed: number): void {
     if (this.speed === speed) return;
     this.speed = speed;
-    const wasPlaying = this.playing;
-    this.generation += 1;
-    this.stopPlaybackOnly();
-    this.clearCache();
-    if (wasPlaying) {
-      void this.play();
-    } else {
-      this.emit(false, null);
+    if (this.audio) {
+      this.audio.playbackRate = speed;
+      (this.audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
     }
-  }
-
-  getCurrentIndex(): number {
-    return this.currentIndex;
-  }
-
-  getCurrentSentence(): TtsSentence | null {
-    return this.sentences[this.currentIndex] ?? null;
+    this.emit(false, null);
   }
 
   async play(fromIndex?: number): Promise<void> {
@@ -295,60 +261,81 @@ export class SentenceTtsController {
     }
     this.cache.clear();
     this.inflight.clear();
+    this.prefetchRunning = false;
   }
 
-  private evictBefore(keepFromIndex: number): void {
+  private evictOutsideWindow(centerIndex: number): void {
+    const minKeep = Math.max(0, centerIndex - KEEP_BEHIND);
+    const maxKeep = centerIndex + PREFETCH_AHEAD + 2;
     for (const [idx, url] of this.cache.entries()) {
-      if (idx < keepFromIndex) {
+      if (idx < minKeep || idx > maxKeep) {
         URL.revokeObjectURL(url);
         this.cache.delete(idx);
       }
     }
   }
 
-  private enqueueSynthesize(index: number, gen: number): Promise<string | null> {
+  private fetchChunk(index: number, gen: number): Promise<string | null> {
     if (index < 0 || index >= this.sentences.length) return Promise.resolve(null);
     const cached = this.cache.get(index);
     if (cached) return Promise.resolve(cached);
-    if (this.inflight.has(index)) {
-      return this.synthQueue.then(() => this.cache.get(index) ?? null);
-    }
 
-    this.inflight.add(index);
+    const existing = this.inflight.get(index);
+    if (existing) return existing;
+
     const sentence = this.sentences[index];
-    const sid = this.speakerId;
-    const speed = this.speed;
+    const voice = this.voice;
 
-    const job = this.synthQueue
-      .catch(() => {})
-      .then(async () => {
-        if (gen !== this.generation) return;
-        if (this.cache.has(index)) return;
-        const resp = await invoke<TtsSynthResponse>('tts_synthesize', {
-          text: sentence.text,
-          sid,
-          speed,
-        });
-        if (gen !== this.generation) return;
-        const url = base64ToWavUrl(resp.wavB64);
+    const promise = invoke<ArrayBuffer>('tts_synthesize', {
+      text: sentence.text,
+      voice,
+    })
+      .then((mp3Buffer) => {
+        if (gen !== this.generation) return null;
+        const url = URL.createObjectURL(new Blob([mp3Buffer], { type: 'audio/mpeg' }));
         this.cache.set(index, url);
+        return url;
       })
       .finally(() => {
-        this.inflight.delete(index);
+        if (this.inflight.get(index) === promise) {
+          this.inflight.delete(index);
+        }
       });
 
-    this.synthQueue = job;
-    return job.then(() => (gen === this.generation ? this.cache.get(index) ?? null : null));
+    this.inflight.set(index, promise);
+    return promise;
   }
 
-  private prefetchAhead(fromIndex: number, gen: number): void {
-    // Sliding window of 2 lookahead sentences
-    for (let offset = 1; offset <= 2; offset += 1) {
-      const idx = fromIndex + offset;
-      if (idx < this.sentences.length && !this.cache.has(idx) && !this.inflight.has(idx)) {
-        void this.enqueueSynthesize(idx, gen).catch(() => {});
+  private pumpPrefetchLoop(gen: number): void {
+    if (this.prefetchRunning) return;
+    this.prefetchRunning = true;
+
+    void (async () => {
+      try {
+        while (gen === this.generation && this.playing) {
+          let nextMissing = -1;
+          const maxIdx = Math.min(
+            this.sentences.length - 1,
+            this.currentIndex + PREFETCH_AHEAD
+          );
+          for (let i = this.currentIndex + 1; i <= maxIdx; i += 1) {
+            if (!this.cache.has(i) && !this.inflight.has(i)) {
+              nextMissing = i;
+              break;
+            }
+          }
+          if (nextMissing === -1) break;
+          try {
+            await this.fetchChunk(nextMissing, gen);
+          } catch {
+            // Stop prefetching on transient network error; playback will retry when reached
+            break;
+          }
+        }
+      } finally {
+        this.prefetchRunning = false;
       }
-    }
+    })();
   }
 
   private async playIndex(index: number, gen: number): Promise<void> {
@@ -360,12 +347,12 @@ export class SentenceTtsController {
     }
 
     this.currentIndex = index;
-    this.evictBefore(index);
-    this.emit(true, null);
+    this.evictOutsideWindow(index);
+    this.emit(!this.cache.has(index), null);
 
     let url: string | null = null;
     try {
-      url = await this.enqueueSynthesize(index, gen);
+      url = await this.fetchChunk(index, gen);
     } catch (err) {
       if (gen !== this.generation) return;
       this.playing = false;
@@ -375,21 +362,17 @@ export class SentenceTtsController {
 
     if (gen !== this.generation || !this.playing || !url) return;
 
-    this.prefetchAhead(index, gen);
+    this.pumpPrefetchLoop(gen);
     this.stopPlaybackOnly();
 
     const audio = new Audio(url);
+    audio.playbackRate = this.speed;
+    (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
     this.audio = audio;
     this.emit(false, null);
 
     audio.onended = () => {
       if (gen !== this.generation || !this.playing) return;
-      // Release played sentence audio immediately
-      const playedUrl = this.cache.get(index);
-      if (playedUrl) {
-        URL.revokeObjectURL(playedUrl);
-        this.cache.delete(index);
-      }
       if (index + 1 < this.sentences.length) {
         void this.playIndex(index + 1, gen);
       } else {

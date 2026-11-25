@@ -175,7 +175,6 @@ pub fn run() {
   }];
 
   tauri::Builder::default()
-    .manage(tts::TtsState::default())
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
@@ -190,11 +189,7 @@ pub fn run() {
       export_markdown_bundle,
       export_library_backup,
       restore_library_backup,
-      tts::tts_status,
-      tts::tts_setup_runtime,
-      tts::tts_download_model,
-      tts::tts_synthesize,
-      tts::tts_stop_worker
+      tts::tts_synthesize
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
