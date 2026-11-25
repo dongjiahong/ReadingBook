@@ -285,6 +285,9 @@ export const BookPane: React.FC<BookPaneProps> = ({
     <div
       className={`book-pane ${isDraggingWireToBook ? 'book-pane--drop-target' : ''}`}
       onMouseUp={handleMouseUp}
+      onTouchEnd={() => {
+        window.setTimeout(handleMouseUp, 120);
+      }}
     >
       {isDraggingWireToBook && (
         <div className="pdf-drop-hint-banner">

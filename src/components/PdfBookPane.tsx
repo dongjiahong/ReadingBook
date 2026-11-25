@@ -356,6 +356,9 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
         cropMode ? 'book-pane--crop-mode' : ''
       }`}
       onMouseUp={handleMouseUp}
+      onTouchEnd={() => {
+        window.setTimeout(handleMouseUp, 120);
+      }}
       onMouseMove={(e) => {
         if (boxDrag) {
           setBoxDrag((prev) =>

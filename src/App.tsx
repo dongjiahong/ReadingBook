@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import MobileReaderView from './MobileReaderView';
 import ReaderView from './ReaderView';
 import { ShelfView } from './components/ShelfView';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -18,6 +19,7 @@ import {
 } from './services/library';
 import type { BookRecord, ReaderSettings } from './types';
 import { deleteStoredImage } from './utils/imageStore';
+import { isMacDesktopRuntime, useIsMobileLayout } from './utils/platform';
 
 const DEFAULT_SETTINGS: ReaderSettings = {
   theme: 'light',
@@ -30,6 +32,8 @@ const DEFAULT_SETTINGS: ReaderSettings = {
 
 export default function App() {
   const desktop = isDesktop();
+  const isMobile = useIsMobileLayout();
+  const isMacDesktop = isMacDesktopRuntime();
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [books, setBooks] = useState<BookRecord[]>([]);
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
@@ -147,25 +151,45 @@ export default function App() {
 
   return (
     <div
-      className={`app-root theme-${settings.theme} ${desktop ? 'is-desktop' : ''}`}
+      className={`app-root theme-${settings.theme} ${isMacDesktop ? 'is-desktop' : ''} ${
+        isMobile ? 'is-mobile' : ''
+      }`}
     >
       {activeBook ? (
-        <ReaderView
-          key={activeBook.id}
-          book={activeBook}
-          settings={settings}
-          onBack={() => {
-            setActiveBookId(null);
-            void refreshBooks();
-          }}
-          onSwitchBook={(bookId) => {
-            const target = books.find((item) => item.id === bookId);
-            if (target) void handleOpenBook(target);
-          }}
-          onOpenSettings={() => setShowSettings(true)}
-          onSettingsChange={updateSettings}
-          onProgress={handleProgress}
-        />
+        isMobile ? (
+          <MobileReaderView
+            key={activeBook.id}
+            book={activeBook}
+            settings={settings}
+            onBack={() => {
+              setActiveBookId(null);
+              void refreshBooks();
+            }}
+            onSwitchBook={(bookId) => {
+              const target = books.find((item) => item.id === bookId);
+              if (target) void handleOpenBook(target);
+            }}
+            onOpenSettings={() => setShowSettings(true)}
+            onProgress={handleProgress}
+          />
+        ) : (
+          <ReaderView
+            key={activeBook.id}
+            book={activeBook}
+            settings={settings}
+            onBack={() => {
+              setActiveBookId(null);
+              void refreshBooks();
+            }}
+            onSwitchBook={(bookId) => {
+              const target = books.find((item) => item.id === bookId);
+              if (target) void handleOpenBook(target);
+            }}
+            onOpenSettings={() => setShowSettings(true)}
+            onSettingsChange={updateSettings}
+            onProgress={handleProgress}
+          />
+        )
       ) : (
         <ShelfView
           books={books}
