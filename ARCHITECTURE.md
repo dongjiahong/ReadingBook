@@ -251,3 +251,39 @@ npm run tauri build -- --bundles app  # 生成 ReadingBook.app
 ```
 
 浏览器预览仍然可用（`npm run dev`）：没有 Tauri 运行时的情况下书架会提示「需要桌面版」，示例文档与批注画布可正常体验。
+
+---
+
+## 八、v0.4.0 跨端演进：v2 规范化数据库、Android 移动端、在线 Edge TTS 与 WiFi 局域网同步（2026-11-25）
+
+v0.4.0 将 ReadingBook 从单机 macOS 阅读器升级为 **macOS + Android 跨端协同阅读工作台**，核心包含以下四个工程模块：
+
+### 1. v2 规范化 SQLite 表结构与外部迁移
+- 废弃旧版整本 JSON 快照表 `book_annotations`，将 `src-tauri/migrations/0001_init.sql` 规范化为 6 张独立表：
+  - `books`（新增 `file_sha256`、`cover_sha256`、`progress_updated_at`、`tts_locator`、`updated_at`、`deleted_at`）
+  - `anchors`、`cards`、`edges`（行级软删除 `deleted_at` + 独立时间戳，便于增量同步）
+  - `sync_peers`（已配对局域网设备 `device_id`、`device_name`、`pairing_secret`、`last_sync_at`、`last_ip`、`last_port`）
+  - `settings`
+- **内容与画布布局解耦**：`cards` 表拆分 `updated_at`（批注正文/附图变更时间）与 `layout_updated_at` / `needs_layout`（桌面 2D 画布坐标变更时间），避免移动端编辑批注覆盖桌面端排版。
+- 应用内不保留 v1 兼容代码；旧库升级由独立脚本 `scripts/migrate_v1_to_v2.py` 一次性无损完成。
+
+### 2. Android 移动端阅读器与 Release 自动化打包
+- **阅读优先架构**：移动端（`< 768px`）不渲染桌面无限画布，改由 `MobileReaderView.tsx` 提供单栏沉浸阅读、底部工具栏、目录/复盘抽屉与 `MobileNoteSheet.tsx`（Bottom Sheet 批注卡片树，支持增改删子卡片、换色、复制与图片灯箱）。
+- **Android SAF 导入**：`src/services/library.ts` 的 `importBookFromPath()` 支持识别 Android `content://` URI（无后缀时通过 `%PDF-` 与 ZIP `PK\x03\x04` 魔数判断格式），并同时复用于 macOS Finder 原生拖拽导入（`getCurrentWebview().onDragDropEvent`）。
+- **自动化 Release 签名打包**：`scripts/build-android.sh` 自动从 `readingbook.png` 同步 Android `mipmap-*` 图标、默认构建 `arm64 release` APK、使用本地持久化 keystore（`~/.readingbook-android-release.jks`）执行 `zipalign` + `apksigner` 签名，并支持一键 WiFi ADB 安装与启动 `com.readingbook.app`。
+
+### 3. 纯 Rust 在线 Edge Neural TTS 与 20 句智能缓存
+- 后端 `src-tauri/src/tts.rs` 基于 `edge-tts-rust`（异步 WebSocket 连接池）合成 `audio-24khz-48kbitrate-mono-mp3`，无需本地模型文件与 JNI 证书初始化，macOS 与 Android 双端统一运行。
+- 精选女声 Top 3（晓晓、晓伊、Ava 双语）与男声 Top 3（云希、云健、Andrew 双语），支持 `0.85x–2.5x` 变速不变调、从当前阅读位置起播与段落高亮跟随。
+- 前端 `src/utils/ttsCache.ts` 在 IndexedDB 持久化预取后续 20 句音频：未听过的音频长期保留，已播放完成的音频在播完 2 小时后自动清理。
+- `TtsPlayerBar.tsx` 采用双行防遮挡控制栏与自定义男女声分组人声选择器，彻底替代原生 `<select>`。
+
+### 4. 纯 Rust WiFi 局域网双向同步
+- 后端 `src-tauri/src/sync.rs` 实现零外部依赖的局域网 P2P 同步服务：
+  - UDP `45888` 广播与监听，自动发现同一 WiFi 下的 ReadingBook 设备；
+  - Tokio 嵌入式 HTTP/1.1 服务（`45889` 端口），提供 `/sync/ping`、`/sync/pair`、`/sync/exchange`、`GET/POST /sync/file`；
+  - 6 位动态配对码（5 分钟 TTL）交换共享密钥，后续所有数据交换与文件传输均校验 `X-RB-Device-Id` + `X-RB-Timestamp` + `X-RB-Signature`（HMAC-SHA256）。
+- 前端 `src/services/sync.ts` 与 `src/components/SyncModal.tsx` 负责增量 SQLite 记录交换、字段级 LWW 合并以及缺失的 `books/`、`covers/`、`images/` 二进制文件双向拉推。
+
+### 5. 两端设置页视觉焕新
+- `SettingsPanel.tsx` 重构为顶部「实时排版预览」+ 分组卡片（`Aa` 主题预览块、分段字体切换、带 `-/+` 微调按钮的滑块），桌面端居中卡片、Android 端底部抽屉弹出。
