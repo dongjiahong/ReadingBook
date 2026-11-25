@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -18,9 +18,9 @@ struct WorkerHandle {
   next_id: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TtsState {
-  worker: Mutex<Option<WorkerHandle>>,
+  worker: Arc<Mutex<Option<WorkerHandle>>>,
 }
 
 #[derive(Serialize)]
@@ -80,6 +80,21 @@ fn python_has_sherpa(py: &str) -> bool {
     .unwrap_or(false)
 }
 
+fn python_minor_version(py: &str) -> Option<(u32, u32)> {
+  let out = Command::new(py)
+    .args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"])
+    .output()
+    .ok()?;
+  if !out.status.success() {
+    return None;
+  }
+  let text = String::from_utf8_lossy(&out.stdout);
+  let mut parts = text.trim().split('.');
+  let major = parts.next()?.parse::<u32>().ok()?;
+  let minor = parts.next()?.parse::<u32>().ok()?;
+  Some((major, minor))
+}
+
 fn resolve_python_with_sherpa(app: &AppHandle) -> Option<String> {
   if let Ok(root) = tts_root_dir(app) {
     let venv_py = root.join("venv").join("bin").join("python3");
@@ -90,7 +105,16 @@ fn resolve_python_with_sherpa(app: &AppHandle) -> Option<String> {
       }
     }
   }
-  for candidate in ["python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
+  for candidate in [
+    "/opt/homebrew/bin/python3.12",
+    "/opt/homebrew/bin/python3.13",
+    "/opt/homebrew/bin/python3.11",
+    "/opt/homebrew/bin/python3.10",
+    "/usr/bin/python3",
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+    "python3",
+  ] {
     if python_has_sherpa(candidate) {
       return Some(candidate.to_string());
     }
@@ -98,20 +122,35 @@ fn resolve_python_with_sherpa(app: &AppHandle) -> Option<String> {
   None
 }
 
-fn resolve_base_python() -> Result<String, String> {
-  for candidate in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "python3"] {
-    if Command::new(candidate)
-      .arg("--version")
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .status()
-      .map(|s| s.success())
-      .unwrap_or(false)
-    {
-      return Ok(candidate.to_string());
+/// Prefer Python 3.9–3.14 where sherpa-onnx publishes prebuilt wheels,
+/// avoiding bleeding-edge Python 3.15+ which would trigger slow C++ source builds.
+fn resolve_wheel_compatible_python() -> Result<String, String> {
+  let candidates = [
+    "/opt/homebrew/bin/python3.12",
+    "/opt/homebrew/bin/python3.13",
+    "/opt/homebrew/bin/python3.11",
+    "/opt/homebrew/bin/python3.10",
+    "/opt/homebrew/bin/python3.14",
+    "/usr/local/bin/python3.12",
+    "/usr/local/bin/python3.11",
+    "/usr/bin/python3",
+    "/opt/homebrew/bin/python3",
+    "python3",
+  ];
+
+  let mut fallback: Option<String> = None;
+  for candidate in candidates {
+    if let Some((major, minor)) = python_minor_version(candidate) {
+      if major == 3 && (9..=14).contains(&minor) {
+        return Ok(candidate.to_string());
+      }
+      if fallback.is_none() {
+        fallback = Some(candidate.to_string());
+      }
     }
   }
-  Err("未找到 python3，请先安装 Python 3".into())
+
+  fallback.ok_or_else(|| "未找到可用的 Python 3（建议 3.9–3.13）".into())
 }
 
 fn ensure_worker_script(app: &AppHandle) -> Result<PathBuf, String> {
@@ -165,164 +204,225 @@ fn spawn_worker(app: &AppHandle) -> Result<WorkerHandle, String> {
 }
 
 #[tauri::command]
-pub fn tts_status(app: AppHandle, state: State<'_, TtsState>) -> Result<TtsStatus, String> {
-  let model_dir = model_dir_path(&app)?;
-  let py = resolve_python_with_sherpa(&app);
-  let worker_running = state
-    .worker
-    .lock()
-    .map(|g| g.is_some())
-    .unwrap_or(false);
-  Ok(TtsStatus {
-    runtime_ready: py.is_some(),
-    model_ready: has_model_files(&model_dir),
-    model_id: KOKORO_MODEL_ID.to_string(),
-    model_dir: model_dir.to_string_lossy().to_string(),
-    python_path: py,
-    worker_running,
+pub async fn tts_status(
+  app: AppHandle,
+  state: State<'_, TtsState>,
+) -> Result<TtsStatus, String> {
+  let worker_arc = state.worker.clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    let model_dir = model_dir_path(&app)?;
+    let py = resolve_python_with_sherpa(&app);
+    let worker_running = worker_arc
+      .lock()
+      .map(|g| g.is_some())
+      .unwrap_or(false);
+    Ok(TtsStatus {
+      runtime_ready: py.is_some(),
+      model_ready: has_model_files(&model_dir),
+      model_id: KOKORO_MODEL_ID.to_string(),
+      model_dir: model_dir.to_string_lossy().to_string(),
+      python_path: py,
+      worker_running,
+    })
   })
+  .await
+  .map_err(|e| format!("读取 TTS 状态任务异常: {e}"))?
 }
 
 #[tauri::command]
-pub fn tts_setup_runtime(app: AppHandle) -> Result<String, String> {
-  let root = tts_root_dir(&app)?;
-  fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-  let venv_dir = root.join("venv");
-  let venv_py = venv_dir.join("bin").join("python3");
+pub async fn tts_setup_runtime(app: AppHandle) -> Result<String, String> {
+  tauri::async_runtime::spawn_blocking(move || {
+    let root = tts_root_dir(&app)?;
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let venv_dir = root.join("venv");
+    let venv_py = venv_dir.join("bin").join("python3");
 
-  if !venv_py.is_file() {
-    let base_py = resolve_base_python()?;
-    let status = Command::new(&base_py)
-      .args(["-m", "venv", &venv_dir.to_string_lossy()])
-      .status()
-      .map_err(|e| format!("创建隔离虚拟环境失败: {e}"))?;
-    if !status.success() {
-      return Err("创建隔离虚拟环境失败".into());
+    // If an older venv was created with an incompatible Python (e.g. 3.15),
+    // rebuild it cleanly with a wheel-compatible Python (3.9–3.14).
+    let needs_recreate = if venv_py.is_file() {
+      match python_minor_version(&venv_py.to_string_lossy()) {
+        Some((3, m)) if (9..=14).contains(&m) => false,
+        _ => true,
+      }
+    } else {
+      true
+    };
+
+    if needs_recreate {
+      if venv_dir.exists() {
+        let _ = fs::remove_dir_all(&venv_dir);
+      }
+      let base_py = resolve_wheel_compatible_python()?;
+      let output = Command::new(&base_py)
+        .args(["-m", "venv", &venv_dir.to_string_lossy()])
+        .output()
+        .map_err(|e| format!("创建隔离虚拟环境失败 ({base_py}): {e}"))?;
+      if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+          "创建隔离虚拟环境失败: {}",
+          err.chars().take(240).collect::<String>()
+        ));
+      }
     }
-  }
 
-  let output = Command::new(&venv_py)
-    .args(["-m", "pip", "install", "--upgrade", "sherpa-onnx"])
-    .output()
-    .map_err(|e| format!("安装 sherpa-onnx 失败: {e}"))?;
+    // Use --only-binary=:all: so pip installs prebuilt wheels in seconds and
+    // never hangs trying to compile C++/ONNXRuntime from source.
+    let output = Command::new(&venv_py)
+      .args([
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--only-binary=:all:",
+        "sherpa-onnx",
+      ])
+      .output()
+      .map_err(|e| format!("安装 sherpa-onnx 失败: {e}"))?;
 
-  if !output.status.success() {
-    let err = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("安装 sherpa-onnx 失败: {}", err.chars().take(240).collect::<String>()));
-  }
+    if !output.status.success() {
+      let err = String::from_utf8_lossy(&output.stderr);
+      return Err(format!(
+        "安装 sherpa-onnx 预编译包失败（建议本机安装 python@3.12 后重试）: {}",
+        err.chars().take(260).collect::<String>()
+      ));
+    }
 
-  Ok(venv_py.to_string_lossy().to_string())
+    Ok(venv_py.to_string_lossy().to_string())
+  })
+  .await
+  .map_err(|e| format!("安装任务异常: {e}"))?
 }
 
 #[tauri::command]
-pub fn tts_download_model(app: AppHandle) -> Result<String, String> {
-  let models_root = tts_root_dir(&app)?.join("models");
-  fs::create_dir_all(&models_root).map_err(|e| e.to_string())?;
-  let target_dir = models_root.join(KOKORO_MODEL_ID);
-  if has_model_files(&target_dir) {
-    return Ok(target_dir.to_string_lossy().to_string());
-  }
+pub async fn tts_download_model(app: AppHandle) -> Result<String, String> {
+  tauri::async_runtime::spawn_blocking(move || {
+    let models_root = tts_root_dir(&app)?.join("models");
+    fs::create_dir_all(&models_root).map_err(|e| e.to_string())?;
+    let target_dir = models_root.join(KOKORO_MODEL_ID);
+    if has_model_files(&target_dir) {
+      return Ok(target_dir.to_string_lossy().to_string());
+    }
 
-  let archive = models_root.join(format!("{KOKORO_MODEL_ID}.tar.bz2"));
-  let dl = Command::new("curl")
-    .args(["-fSL", "--retry", "2", "-o"])
-    .arg(&archive)
-    .arg(KOKORO_MODEL_URL)
-    .output()
-    .map_err(|e| format!("下载模型失败: {e}"))?;
+    let archive = models_root.join(format!("{KOKORO_MODEL_ID}.tar.bz2"));
+    let dl = Command::new("curl")
+      .args(["-fSL", "--retry", "2", "-o"])
+      .arg(&archive)
+      .arg(KOKORO_MODEL_URL)
+      .output()
+      .map_err(|e| format!("下载模型失败: {e}"))?;
 
-  if !dl.status.success() {
+    if !dl.status.success() {
+      let _ = fs::remove_file(&archive);
+      let err = String::from_utf8_lossy(&dl.stderr);
+      return Err(format!(
+        "下载 Kokoro 模型失败: {}",
+        err.chars().take(200).collect::<String>()
+      ));
+    }
+
+    let extract = Command::new("tar")
+      .arg("-xjf")
+      .arg(&archive)
+      .arg("-C")
+      .arg(&models_root)
+      .output()
+      .map_err(|e| format!("解压模型失败: {e}"))?;
+
     let _ = fs::remove_file(&archive);
-    let err = String::from_utf8_lossy(&dl.stderr);
-    return Err(format!("下载 Kokoro 模型失败: {}", err.chars().take(200).collect::<String>()));
-  }
 
-  let extract = Command::new("tar")
-    .arg("-xjf")
-    .arg(&archive)
-    .arg("-C")
-    .arg(&models_root)
-    .output()
-    .map_err(|e| format!("解压模型失败: {e}"))?;
+    if !extract.status.success() || !has_model_files(&target_dir) {
+      let err = String::from_utf8_lossy(&extract.stderr);
+      return Err(format!(
+        "解压 Kokoro 模型失败: {}",
+        err.chars().take(200).collect::<String>()
+      ));
+    }
 
-  let _ = fs::remove_file(&archive);
-
-  if !extract.status.success() || !has_model_files(&target_dir) {
-    let err = String::from_utf8_lossy(&extract.stderr);
-    return Err(format!("解压 Kokoro 模型失败: {}", err.chars().take(200).collect::<String>()));
-  }
-
-  Ok(target_dir.to_string_lossy().to_string())
+    Ok(target_dir.to_string_lossy().to_string())
+  })
+  .await
+  .map_err(|e| format!("下载模型任务异常: {e}"))?
 }
 
 #[tauri::command]
-pub fn tts_synthesize(
+pub async fn tts_synthesize(
   app: AppHandle,
   state: State<'_, TtsState>,
   text: String,
   sid: u32,
   speed: f32,
 ) -> Result<TtsSynthResult, String> {
-  let trimmed = text.trim();
-  if trimmed.is_empty() {
-    return Err("待合成文本为空".into());
-  }
+  let worker_arc = state.worker.clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+      return Err("待合成文本为空".into());
+    }
 
-  let mut guard = state.worker.lock().map_err(|_| "TTS 状态锁异常".to_string())?;
-  if guard.is_none() {
-    *guard = Some(spawn_worker(&app)?);
-  }
+    let mut guard = worker_arc.lock().map_err(|_| "TTS 状态锁异常".to_string())?;
+    if guard.is_none() {
+      *guard = Some(spawn_worker(&app)?);
+    }
 
-  let handle = guard.as_mut().ok_or("TTS 进程未就绪")?;
-  let req_id = handle.next_id;
-  handle.next_id += 1;
+    let handle = guard.as_mut().ok_or("TTS 进程未就绪")?;
+    let req_id = handle.next_id;
+    handle.next_id += 1;
 
-  let req_json = serde_json::json!({
-    "id": req_id,
-    "text": trimmed,
-    "sid": sid,
-    "speed": speed,
-  });
+    let req_json = serde_json::json!({
+      "id": req_id,
+      "text": trimmed,
+      "sid": sid,
+      "speed": speed,
+    });
 
-  if let Err(err) = writeln!(handle.stdin, "{req_json}").and_then(|_| handle.stdin.flush()) {
-    let _ = handle.child.kill();
-    *guard = None;
-    return Err(format!("写入 TTS 请求失败: {err}"));
-  }
+    if let Err(err) = writeln!(handle.stdin, "{req_json}").and_then(|_| handle.stdin.flush()) {
+      let _ = handle.child.kill();
+      *guard = None;
+      return Err(format!("写入 TTS 请求失败: {err}"));
+    }
 
-  let mut resp_line = String::new();
-  if let Err(err) = handle.stdout.read_line(&mut resp_line) {
-    let _ = handle.child.kill();
-    *guard = None;
-    return Err(format!("读取 TTS 音频失败: {err}"));
-  }
+    let mut resp_line = String::new();
+    if let Err(err) = handle.stdout.read_line(&mut resp_line) {
+      let _ = handle.child.kill();
+      *guard = None;
+      return Err(format!("读取 TTS 音频失败: {err}"));
+    }
 
-  if resp_line.trim().is_empty() {
-    let _ = handle.child.kill();
-    *guard = None;
-    return Err("TTS 进程意外退出，请重试".into());
-  }
+    if resp_line.trim().is_empty() {
+      let _ = handle.child.kill();
+      *guard = None;
+      return Err("TTS 进程意外退出，请重试".into());
+    }
 
-  let resp: WorkerSynthResp = serde_json::from_str(resp_line.trim())
-    .map_err(|e| format!("解析 TTS 响应失败: {e}"))?;
-  if !resp.ok {
-    return Err(resp.error.unwrap_or_else(|| "语音合成失败".into()));
-  }
+    let resp: WorkerSynthResp = serde_json::from_str(resp_line.trim())
+      .map_err(|e| format!("解析 TTS 响应失败: {e}"))?;
+    if !resp.ok {
+      return Err(resp.error.unwrap_or_else(|| "语音合成失败".into()));
+    }
 
-  Ok(TtsSynthResult {
-    wav_b64: resp.wav_b64.unwrap_or_default(),
-    sample_rate: resp.sample_rate.unwrap_or(24000),
+    Ok(TtsSynthResult {
+      wav_b64: resp.wav_b64.unwrap_or_default(),
+      sample_rate: resp.sample_rate.unwrap_or(24000),
+    })
   })
+  .await
+  .map_err(|e| format!("语音合成任务异常: {e}"))?
 }
 
 #[tauri::command]
-pub fn tts_stop_worker(state: State<'_, TtsState>) -> Result<(), String> {
-  let mut guard = state.worker.lock().map_err(|_| "TTS 状态锁异常".to_string())?;
-  if let Some(mut handle) = guard.take() {
-    let _ = writeln!(handle.stdin, r#"{{"cmd":"quit"}}"#);
-    let _ = handle.stdin.flush();
-    let _ = handle.child.kill();
-    let _ = handle.child.wait();
-  }
-  Ok(())
+pub async fn tts_stop_worker(state: State<'_, TtsState>) -> Result<(), String> {
+  let worker_arc = state.worker.clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    let mut guard = worker_arc.lock().map_err(|_| "TTS 状态锁异常".to_string())?;
+    if let Some(mut handle) = guard.take() {
+      let _ = writeln!(handle.stdin, r#"{{"cmd":"quit"}}"#);
+      let _ = handle.stdin.flush();
+      let _ = handle.child.kill();
+      let _ = handle.child.wait();
+    }
+    Ok(())
+  })
+  .await
+  .map_err(|e| format!("停止 TTS 任务异常: {e}"))?
 }
