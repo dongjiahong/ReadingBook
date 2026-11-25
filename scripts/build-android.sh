@@ -90,8 +90,9 @@ if [[ ! -d "$ROOT_DIR/src-tauri/gen/android" ]]; then
   npx tauri android init
 fi
 
-# 3.5 Sync Android launcher icons from readingbook.png
-if [[ -f "$ROOT_DIR/readingbook.png" ]]; then
+# 3.5 Sync Android launcher icons only when missing or readingbook.png changed
+ANDROID_ICON_CHECK="$ROOT_DIR/src-tauri/gen/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+if [[ -f "$ROOT_DIR/readingbook.png" ]] && [[ ! -f "$ANDROID_ICON_CHECK" || "$ROOT_DIR/readingbook.png" -nt "$ANDROID_ICON_CHECK" ]]; then
   echo "[STEP] Syncing Android launcher icons from readingbook.png..."
   npx tauri icon "$ROOT_DIR/readingbook.png" >/dev/null
 fi
