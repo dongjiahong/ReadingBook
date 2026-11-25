@@ -491,3 +491,110 @@ export async function restoreThumbUrls(
   }
   return restored;
 }
+
+function extractImageIdFromFilename(filename: string): string | null {
+  const thumbIdx = filename.indexOf('.thumb.');
+  if (thumbIdx > 0) return filename.slice(0, thumbIdx);
+  const dotIdx = filename.lastIndexOf('.');
+  if (dotIdx > 0) return filename.slice(0, dotIdx);
+  return null;
+}
+
+function extractTimestampFromImageId(id: string): number | null {
+  const match = /^img-(\d{10,})-/.exec(id);
+  if (!match) return null;
+  const ts = Number(match[1]);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+async function listAllIdbImageIds(): Promise<string[]> {
+  const db = await openDb();
+  if (!db || useMemoryFallback) {
+    return Array.from(memoryImages.keys());
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const request = tx.objectStore(STORE_NAME).getAllKeys();
+    request.onsuccess = () => {
+      const keys = Array.isArray(request.result)
+        ? request.result.filter((k): k is string => typeof k === 'string')
+        : [];
+      resolve(keys);
+    };
+    request.onerror = () => resolve([]);
+  });
+}
+
+export interface OrphanCleanupResult {
+  removedDiskFiles: number;
+  removedIdbRecords: number;
+}
+
+/**
+ * 扫描并删除磁盘（$APPDATA/images/）与 IndexedDB 中不再被任何活跃卡片引用的孤儿图片。
+ * 通过 minAgeMs 冷却期跳过刚刚写入的图片，避免误删尚未落盘或正在编辑中的图片。
+ */
+export async function cleanupOrphanImages(
+  referencedIds: Set<string>,
+  referencedFilenames: Set<string>,
+  options?: { minAgeMs?: number }
+): Promise<OrphanCleanupResult> {
+  const minAgeMs = options?.minAgeMs ?? 60_000;
+  const now = Date.now();
+  let removedDiskFiles = 0;
+  let removedIdbRecords = 0;
+
+  if (isDesktop()) {
+    try {
+      const dirExists = await exists(IMAGES_DIR, { baseDir: BaseDirectory.AppData }).catch(
+        () => false
+      );
+      if (dirExists) {
+        const entries = await readDir(IMAGES_DIR, { baseDir: BaseDirectory.AppData });
+        for (const entry of entries) {
+          if (!entry.name || entry.name.startsWith('.') || entry.isDirectory) continue;
+          if (referencedFilenames.has(entry.name)) continue;
+
+          const id = extractImageIdFromFilename(entry.name);
+          if (!id) continue;
+          if (referencedIds.has(id)) continue;
+
+          if (minAgeMs > 0) {
+            const createdTs = extractTimestampFromImageId(id);
+            if (createdTs !== null && now - createdTs < minAgeMs) continue;
+          }
+
+          try {
+            await remove(`${IMAGES_DIR}/${entry.name}`, {
+              baseDir: BaseDirectory.AppData,
+            });
+            revokeImageUrl(id);
+            removedDiskFiles += 1;
+          } catch {
+            // 忽略单个文件删除失败
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('扫描磁盘孤儿图片失败', err);
+    }
+  }
+
+  try {
+    const idbIds = await listAllIdbImageIds();
+    for (const id of idbIds) {
+      if (referencedIds.has(id)) continue;
+      if (minAgeMs > 0) {
+        const createdTs = extractTimestampFromImageId(id);
+        if (createdTs !== null && now - createdTs < minAgeMs) continue;
+      }
+      await deleteImageFromIdb(id).catch(() => {});
+      revokeImageUrl(id);
+      removedIdbRecords += 1;
+    }
+  } catch (err) {
+    console.warn('扫描 IndexedDB 孤儿图片失败', err);
+  }
+
+  return { removedDiskFiles, removedIdbRecords };
+}

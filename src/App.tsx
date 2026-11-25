@@ -8,6 +8,7 @@ import { SyncModal } from './components/SyncModal';
 import {
   deleteBookRecord,
   listBooks,
+  listReferencedImageRefs,
   loadAnnotations,
   loadSettings,
   saveSettings,
@@ -23,7 +24,7 @@ import {
 import { initSyncHost } from './services/sync';
 import type { BookRecord, ReaderSettings } from './types';
 import { useBackHandler } from './utils/backStack';
-import { deleteStoredImage } from './utils/imageStore';
+import { cleanupOrphanImages, deleteStoredImage } from './utils/imageStore';
 import { isMacDesktopRuntime, useIsMobileLayout } from './utils/platform';
 
 const DEFAULT_SETTINGS: ReaderSettings = {
@@ -63,9 +64,23 @@ export default function App() {
     }
   }, [desktop]);
 
+  const runOrphanImageCleanup = useCallback(
+    async (minAgeMs = 60_000) => {
+      if (!desktop) return;
+      try {
+        const { ids, filenames } = await listReferencedImageRefs();
+        await cleanupOrphanImages(ids, filenames, { minAgeMs });
+      } catch (err) {
+        console.warn('清理未引用图片失败', err);
+      }
+    },
+    [desktop]
+  );
+
   useEffect(() => {
     if (!desktop) return;
     let alive = true;
+    let gcTimer: number | null = null;
     void (async () => {
       try {
         const stored = await loadSettings();
@@ -76,11 +91,17 @@ export default function App() {
         console.warn('读取设置失败', err);
       }
       await refreshBooks();
+      if (alive) {
+        gcTimer = window.setTimeout(() => {
+          void runOrphanImageCleanup(60_000);
+        }, 1500);
+      }
     })();
     return () => {
       alive = false;
+      if (gcTimer !== null) window.clearTimeout(gcTimer);
     };
-  }, [desktop, refreshBooks]);
+  }, [desktop, refreshBooks, runOrphanImageCleanup]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -301,7 +322,10 @@ export default function App() {
       <SyncModal
         open={showSync}
         onClose={() => setShowSync(false)}
-        onSynced={() => void refreshBooks()}
+        onSynced={() => {
+          void refreshBooks();
+          void runOrphanImageCleanup(60_000);
+        }}
       />
 
       {pendingDelete && (

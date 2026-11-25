@@ -681,3 +681,53 @@ export async function saveSettings(settings: ReaderSettings): Promise<void> {
     [JSON.stringify(settings)]
   );
 }
+
+export interface ReferencedImageRefs {
+  ids: Set<string>;
+  filenames: Set<string>;
+}
+
+/**
+ * 收集数据库中所有未删除书籍、未删除卡片正在引用的图片 ID 与文件名，
+ * 供孤儿图片垃圾回收比对使用。
+ */
+export async function listReferencedImageRefs(): Promise<ReferencedImageRefs> {
+  const db = await getDb();
+  const rows = await db.select<{ images_json: string }[]>(
+    `SELECT c.images_json
+     FROM cards c
+     INNER JOIN books b ON b.id = c.book_id
+     WHERE c.deleted_at IS NULL
+       AND b.deleted_at IS NULL
+       AND c.images_json IS NOT NULL
+       AND c.images_json != ''
+       AND c.images_json != '[]'`
+  );
+
+  const ids = new Set<string>();
+  const filenames = new Set<string>();
+
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.images_json) as Partial<CardImage>[];
+      if (!Array.isArray(parsed)) continue;
+      for (const img of parsed) {
+        if (typeof img?.id === 'string' && img.id.length > 0) {
+          ids.add(img.id);
+        }
+        if (typeof img?.filePath === 'string' && img.filePath.length > 0) {
+          const base = img.filePath.split('/').pop();
+          if (base) filenames.add(base);
+        }
+        if (typeof img?.thumbPath === 'string' && img.thumbPath.length > 0) {
+          const base = img.thumbPath.split('/').pop();
+          if (base) filenames.add(base);
+        }
+      }
+    } catch {
+      // 忽略单行异常 JSON，不影响其余记录
+    }
+  }
+
+  return { ids, filenames };
+}

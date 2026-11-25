@@ -10,10 +10,13 @@ import {
   Plus,
   RotateCcw,
   SlidersHorizontal,
+  Trash2,
   X,
 } from 'lucide-react';
+import { listReferencedImageRefs } from '../services/db';
 import { isDesktop } from '../services/library';
 import type { ReaderFont, ReaderSettings, ReaderTheme } from '../types';
+import { cleanupOrphanImages } from '../utils/imageStore';
 import { useIsMobileLayout } from '../utils/platform';
 
 interface SettingsPanelProps {
@@ -57,10 +60,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     text: string;
   } | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [cleanupStatus, setCleanupStatus] = useState<{
+    kind: 'ok' | 'err';
+    text: string;
+  } | null>(null);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
       setBackupStatus(null);
+      setCleanupStatus(null);
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -134,6 +143,34 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       });
     } finally {
       setBackupBusy(false);
+    }
+  };
+
+  const handleCleanupOrphanImages = async () => {
+    setCleanupBusy(true);
+    setCleanupStatus(null);
+    try {
+      const { ids, filenames } = await listReferencedImageRefs();
+      const { removedDiskFiles, removedIdbRecords } = await cleanupOrphanImages(
+        ids,
+        filenames,
+        { minAgeMs: 5_000 }
+      );
+      const total = removedDiskFiles + removedIdbRecords;
+      setCleanupStatus({
+        kind: 'ok',
+        text:
+          total > 0
+            ? `已清理 ${total} 个未引用的冗余图片文件`
+            : '没有发现未引用的冗余图片',
+      });
+    } catch (err) {
+      setCleanupStatus({
+        kind: 'err',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setCleanupBusy(false);
     }
   };
 
@@ -356,6 +393,36 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               )}
               <p className="settings-control__hint">
                 含全部书籍、批注数据库与卡片附图，换机或重装时一键迁移。
+              </p>
+            </section>
+          )}
+
+          {/* Orphan Image Cleanup Card (Desktop & Mobile Tauri runtimes) */}
+          {isDesktop() && (
+            <section className="settings-card">
+              <div className="settings-card__title">存储空间清理</div>
+              <div className="settings-backup-actions">
+                <button
+                  type="button"
+                  className="settings-backup-btn"
+                  disabled={cleanupBusy}
+                  onClick={() => void handleCleanupOrphanImages()}
+                >
+                  <Trash2 size={14} />
+                  <span>{cleanupBusy ? '正在扫描清理…' : '清理未引用图片'}</span>
+                </button>
+              </div>
+              {cleanupStatus && (
+                <p
+                  className={`settings-backup-status ${
+                    cleanupStatus.kind === 'err' ? 'is-error' : 'is-ok'
+                  }`}
+                >
+                  {cleanupStatus.text}
+                </p>
+              )}
+              <p className="settings-control__hint">
+                启动时也会自动清理异常退出或同步删除残留的孤儿图片。
               </p>
             </section>
           )}

@@ -637,6 +637,10 @@ export default function ReaderView({
       for (const image of newImages) void deleteStoredImage(image);
       return;
     }
+    // 登记到待检集合：若后续通过 ⌘Z 撤销建卡导致该图不再被引用，离开书籍时会自动清理。
+    for (const image of newImages) {
+      pendingDeleteImagesRef.current.set(image.id, image);
+    }
     setCards((prev) =>
       prev.map((c) =>
         c.id === cardId ? { ...c, images: [...(c.images ?? []), ...newImages] } : c
@@ -1672,6 +1676,7 @@ export default function ReaderView({
       }
       pushUndoSnapshot();
       pendingDeleteImagesRef.current.set(target.image.id, target.image);
+      pendingDeleteImagesRef.current.set(replacement.id, replacement);
       setCards((prev) =>
         prev.map((c) =>
           c.id === target.cardId
@@ -2194,6 +2199,9 @@ export default function ReaderView({
       });
       const imported = await importImageFiles([file]);
       if (imported.length === 0) return;
+      for (const img of imported) {
+        pendingDeleteImagesRef.current.set(img.id, img);
+      }
 
       pushUndoSnapshot();
       const anchorId = `anchor-${Date.now()}`;
@@ -2256,6 +2264,9 @@ export default function ReaderView({
       );
       const imported = await importImageFiles([file]);
       if (imported.length === 0) return;
+      for (const img of imported) {
+        pendingDeleteImagesRef.current.set(img.id, img);
+      }
 
       pushUndoSnapshot();
       const anchorId = `anchor-${Date.now()}`;
