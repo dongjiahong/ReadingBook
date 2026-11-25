@@ -3,7 +3,6 @@ import { appDataDir, basename, join } from '@tauri-apps/api/path';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   BaseDirectory,
-  copyFile,
   mkdir,
   readFile,
   remove,
@@ -137,20 +136,37 @@ export async function importBookFromDisk(): Promise<BookRecord | null> {
   if (!selected || Array.isArray(selected)) return null;
 
   const sourcePath = selected;
-  const fileName = await basename(sourcePath);
+  const rawBaseName = await basename(sourcePath).catch(() => 'book');
+  const fileName = decodeURIComponent(rawBaseName);
+  const bytes = await readFile(sourcePath);
+
   const lower = fileName.toLowerCase();
-  const format = lower.endsWith('.pdf') ? 'pdf' : lower.endsWith('.epub') ? 'epub' : null;
+  let format: 'pdf' | 'epub' | null = lower.endsWith('.pdf')
+    ? 'pdf'
+    : lower.endsWith('.epub')
+      ? 'epub'
+      : null;
+
+  // Android Storage Access Framework URIs (content://...) may omit file extensions;
+  // fall back to magic bytes (%PDF- vs ZIP PK\x03\x04).
+  if (!format && bytes.length >= 4) {
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+      format = 'pdf';
+    } else if (bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+      format = 'epub';
+    }
+  }
+
   if (!format) {
     throw new Error('请选择 .epub 或 .pdf 文件');
   }
 
-  const bytes = await readFile(sourcePath);
   const file = new File([bytes], fileName, {
     type: format === 'pdf' ? PDF_MIME : EPUB_MIME,
   });
 
   const id = newBookId();
-  let title = fileName.replace(/\.(epub|pdf)$/i, '');
+  let title = fileName.replace(/\.(epub|pdf)$/i, '') || '未命名书籍';
   let author = '';
   let totalParagraphs = 0;
   let coverBytes: Uint8Array | null = null;
@@ -187,8 +203,8 @@ export async function importBookFromDisk(): Promise<BookRecord | null> {
   await ensureLibraryDirs();
 
   const fileNameOnDisk = `books/${id}.${format}`;
-  await copyFile(sourcePath, fileNameOnDisk, {
-    toPathBaseDir: BaseDirectory.AppData,
+  await writeFile(fileNameOnDisk, bytes, {
+    baseDir: BaseDirectory.AppData,
   });
 
   let coverPath: string | null = null;
