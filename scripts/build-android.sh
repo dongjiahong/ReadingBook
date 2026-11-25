@@ -100,13 +100,10 @@ fi
 echo "[STEP] Building ReadingBook arm64 release APK..."
 npx tauri android build --apk --target aarch64
 
-APK_DIR="$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk/arm64/release"
-RAW_APK="$(find "$APK_DIR" -maxdepth 1 -name '*.apk' ! -name '*-signed.apk' ! -name '*-aligned.apk' -type f | head -n 1)"
+APK_ROOT="$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk"
+RAW_APK="$(find "$APK_ROOT" -path '*/release/*.apk' ! -name '*-signed.apk' ! -name '*-aligned.apk' -type f 2>/dev/null | head -n 1 || true)"
 if [[ -z "$RAW_APK" || ! -f "$RAW_APK" ]]; then
-  RAW_APK="$(find "$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk" -path '*/release/*.apk' ! -name '*-signed.apk' ! -name '*-aligned.apk' -type f | head -n 1)"
-fi
-if [[ -z "$RAW_APK" || ! -f "$RAW_APK" ]]; then
-  echo "[ERROR] Release APK not found after build." >&2
+  echo "[ERROR] Release APK not found under $APK_ROOT." >&2
   exit 1
 fi
 
