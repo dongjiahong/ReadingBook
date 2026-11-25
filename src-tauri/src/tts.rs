@@ -1,15 +1,16 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const KOKORO_MODEL_ID: &str = "kokoro-int8-multi-lang-v1_1";
 const KOKORO_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2";
 const WORKER_SCRIPT: &str = include_str!("../../scripts/tts_worker.py");
+const PROGRESS_EVENT: &str = "tts-progress";
 
 struct WorkerHandle {
   child: Child,
@@ -21,6 +22,27 @@ struct WorkerHandle {
 #[derive(Clone, Default)]
 pub struct TtsState {
   worker: Arc<Mutex<Option<WorkerHandle>>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsProgressEvent {
+  task: String,
+  percent: Option<u8>,
+  stage: String,
+  log: Option<String>,
+}
+
+fn emit_progress(app: &AppHandle, task: &str, percent: Option<u8>, stage: &str, log: Option<String>) {
+  let _ = app.emit(
+    PROGRESS_EVENT,
+    TtsProgressEvent {
+      task: task.to_string(),
+      percent,
+      stage: stage.to_string(),
+      log,
+    },
+  );
 }
 
 #[derive(Serialize)]
@@ -153,6 +175,74 @@ fn resolve_wheel_compatible_python() -> Result<String, String> {
   fallback.ok_or_else(|| "未找到可用的 Python 3（建议 3.9–3.13）".into())
 }
 
+fn detect_macos_proxy_url() -> Option<String> {
+  for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+    if let Ok(val) = std::env::var(key) {
+      let trimmed = val.trim();
+      if !trimmed.is_empty() {
+        return Some(trimmed.to_string());
+      }
+    }
+  }
+  #[cfg(target_os = "macos")]
+  {
+    let out = Command::new("scutil").arg("--proxy").output().ok()?;
+    if !out.status.success() {
+      return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut http_en = false;
+    let mut http_host = String::new();
+    let mut http_port = String::new();
+    let mut https_en = false;
+    let mut https_host = String::new();
+    let mut https_port = String::new();
+    let mut socks_en = false;
+    let mut socks_host = String::new();
+    let mut socks_port = String::new();
+
+    for line in text.lines() {
+      if let Some((k, v)) = line.trim().split_once(':') {
+        let key = k.trim();
+        let val = v.trim();
+        match key {
+          "HTTPEnable" => http_en = val == "1",
+          "HTTPProxy" => http_host = val.to_string(),
+          "HTTPPort" => http_port = val.to_string(),
+          "HTTPSEnable" => https_en = val == "1",
+          "HTTPSProxy" => https_host = val.to_string(),
+          "HTTPSPort" => https_port = val.to_string(),
+          "SOCKSEnable" => socks_en = val == "1",
+          "SOCKSProxy" => socks_host = val.to_string(),
+          "SOCKSPort" => socks_port = val.to_string(),
+          _ => {}
+        }
+      }
+    }
+    if https_en && !https_host.is_empty() && !https_port.is_empty() {
+      return Some(format!("http://{https_host}:{https_port}"));
+    }
+    if http_en && !http_host.is_empty() && !http_port.is_empty() {
+      return Some(format!("http://{http_host}:{http_port}"));
+    }
+    if socks_en && !socks_host.is_empty() && !socks_port.is_empty() {
+      return Some(format!("socks5h://{socks_host}:{socks_port}"));
+    }
+  }
+  None
+}
+
+fn apply_proxy_env(cmd: &mut Command) -> Option<String> {
+  if let Some(proxy) = detect_macos_proxy_url() {
+    cmd.env("HTTP_PROXY", &proxy);
+    cmd.env("HTTPS_PROXY", &proxy);
+    cmd.env("http_proxy", &proxy);
+    cmd.env("https_proxy", &proxy);
+    return Some(proxy);
+  }
+  None
+}
+
 fn ensure_worker_script(app: &AppHandle) -> Result<PathBuf, String> {
   let root = tts_root_dir(app)?;
   fs::create_dir_all(&root).map_err(|e| e.to_string())?;
@@ -203,6 +293,23 @@ fn spawn_worker(app: &AppHandle) -> Result<WorkerHandle, String> {
   })
 }
 
+fn parse_curl_percent(line: &str) -> Option<(u8, String)> {
+  // Standard curl progress table columns:
+  // % Total  % Received  % Xferd  Average Speed ...
+  let parts: Vec<&str> = line.split_whitespace().collect();
+  if parts.len() < 7 {
+    return None;
+  }
+  let pct = parts[0].parse::<u8>().ok()?;
+  if pct > 100 {
+    return None;
+  }
+  let total = parts[1];
+  let received = parts[3];
+  let speed = parts[6];
+  Some((pct, format!("{received} / {total} · {speed}/s")))
+}
+
 #[tauri::command]
 pub async fn tts_status(
   app: AppHandle,
@@ -237,8 +344,8 @@ pub async fn tts_setup_runtime(app: AppHandle) -> Result<String, String> {
     let venv_dir = root.join("venv");
     let venv_py = venv_dir.join("bin").join("python3");
 
-    // If an older venv was created with an incompatible Python (e.g. 3.15),
-    // rebuild it cleanly with a wheel-compatible Python (3.9–3.14).
+    emit_progress(&app, "runtime", Some(5), "检查本机 Python 环境…", None);
+
     let needs_recreate = if venv_py.is_file() {
       match python_minor_version(&venv_py.to_string_lossy()) {
         Some((3, m)) if (9..=14).contains(&m) => false,
@@ -253,6 +360,13 @@ pub async fn tts_setup_runtime(app: AppHandle) -> Result<String, String> {
         let _ = fs::remove_dir_all(&venv_dir);
       }
       let base_py = resolve_wheel_compatible_python()?;
+      emit_progress(
+        &app,
+        "runtime",
+        Some(15),
+        "正在创建隔离虚拟环境…",
+        Some(format!("使用 {base_py}")),
+      );
       let output = Command::new(&base_py)
         .args(["-m", "venv", &venv_dir.to_string_lossy()])
         .output()
@@ -266,28 +380,91 @@ pub async fn tts_setup_runtime(app: AppHandle) -> Result<String, String> {
       }
     }
 
-    // Use --only-binary=:all: so pip installs prebuilt wheels in seconds and
-    // never hangs trying to compile C++/ONNXRuntime from source.
-    let output = Command::new(&venv_py)
+    let mut pip_cmd = Command::new(&venv_py);
+    pip_cmd
       .args([
+        "-u",
         "-m",
         "pip",
         "install",
         "--upgrade",
         "--only-binary=:all:",
+        "--default-timeout",
+        "25",
+        "--retries",
+        "2",
+        "--progress-bar",
+        "off",
         "sherpa-onnx",
       ])
-      .output()
-      .map_err(|e| format!("安装 sherpa-onnx 失败: {e}"))?;
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped());
+    let proxy_used = apply_proxy_env(&mut pip_cmd);
 
-    if !output.status.success() {
-      let err = String::from_utf8_lossy(&output.stderr);
+    emit_progress(
+      &app,
+      "runtime",
+      Some(28),
+      "正在连接 PyPI 获取 sherpa-onnx 预编译包…",
+      proxy_used.map(|p| format!("已自动使用代理 {p}")),
+    );
+
+    let mut child = pip_cmd
+      .spawn()
+      .map_err(|e| format!("启动 pip 安装失败: {e}"))?;
+
+    let stderr_handle = child.stderr.take().map(|err_pipe| {
+      std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut reader = BufReader::new(err_pipe);
+        let _ = reader.read_to_string(&mut buf);
+        buf
+      })
+    });
+
+    let mut pct: u8 = 30;
+    if let Some(out_pipe) = child.stdout.take() {
+      let reader = BufReader::new(out_pipe);
+      for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+          continue;
+        }
+        let stage = if trimmed.starts_with("Collecting") {
+          pct = pct.max(40);
+          "正在解析依赖包…"
+        } else if trimmed.starts_with("Downloading") {
+          pct = pct.max(60);
+          "正在下载 sherpa-onnx 预编译包…"
+        } else if trimmed.starts_with("Installing collected") {
+          pct = pct.max(84);
+          "正在安装依赖到本地隔离环境…"
+        } else if trimmed.starts_with("Successfully installed") {
+          pct = 98;
+          "安装完成，正在校验…"
+        } else {
+          pct = (pct + 2).min(92);
+          "正在安装 sherpa-onnx…"
+        };
+        emit_progress(&app, "runtime", Some(pct), stage, Some(trimmed));
+      }
+    }
+
+    let status = child
+      .wait()
+      .map_err(|e| format!("等待 pip 结束失败: {e}"))?;
+    let stderr_text = stderr_handle
+      .and_then(|h| h.join().ok())
+      .unwrap_or_default();
+
+    if !status.success() {
       return Err(format!(
         "安装 sherpa-onnx 预编译包失败（建议本机安装 python@3.12 后重试）: {}",
-        err.chars().take(260).collect::<String>()
+        stderr_text.chars().take(260).collect::<String>()
       ));
     }
 
+    emit_progress(&app, "runtime", Some(100), "离线推理引擎安装完成", None);
     Ok(venv_py.to_string_lossy().to_string())
   })
   .await
@@ -301,25 +478,93 @@ pub async fn tts_download_model(app: AppHandle) -> Result<String, String> {
     fs::create_dir_all(&models_root).map_err(|e| e.to_string())?;
     let target_dir = models_root.join(KOKORO_MODEL_ID);
     if has_model_files(&target_dir) {
+      emit_progress(&app, "model", Some(100), "Kokoro 模型已就绪", None);
       return Ok(target_dir.to_string_lossy().to_string());
     }
 
     let archive = models_root.join(format!("{KOKORO_MODEL_ID}.tar.bz2"));
-    let dl = Command::new("curl")
-      .args(["-fSL", "--retry", "2", "-o"])
+    let mut curl_cmd = Command::new("curl");
+    curl_cmd
+      .args([
+        "-fL",
+        "--connect-timeout",
+        "15",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "30",
+        "--retry",
+        "2",
+        "-o",
+      ])
       .arg(&archive)
       .arg(KOKORO_MODEL_URL)
-      .output()
-      .map_err(|e| format!("下载模型失败: {e}"))?;
+      .stdout(Stdio::null())
+      .stderr(Stdio::piped());
+    let proxy_used = apply_proxy_env(&mut curl_cmd);
 
-    if !dl.status.success() {
+    emit_progress(
+      &app,
+      "model",
+      Some(1),
+      "正在连接 GitHub 下载 Kokoro 中英模型…",
+      proxy_used.map(|p| format!("已自动使用代理 {p}")),
+    );
+
+    let mut child = curl_cmd
+      .spawn()
+      .map_err(|e| format!("启动模型下载失败: {e}"))?;
+
+    let mut last_err_line = String::new();
+    if let Some(mut err_pipe) = child.stderr.take() {
+      let mut byte = [0u8; 1];
+      let mut current = Vec::<u8>::with_capacity(128);
+      while err_pipe.read(&mut byte).unwrap_or(0) == 1 {
+        if byte[0] == b'\r' || byte[0] == b'\n' {
+          if !current.is_empty() {
+            let line = String::from_utf8_lossy(&current).trim().to_string();
+            current.clear();
+            if line.is_empty() {
+              continue;
+            }
+            if let Some((raw_pct, detail)) = parse_curl_percent(&line) {
+              // Map download 0..100% -> overall 2..88% (leaving 88..100% for extraction)
+              let scaled = 2 + ((raw_pct as u16 * 86) / 100) as u8;
+              emit_progress(
+                &app,
+                "model",
+                Some(scaled),
+                &format!("正在下载 Kokoro 模型 ({raw_pct}%)…"),
+                Some(detail),
+              );
+            } else {
+              last_err_line = line;
+            }
+          }
+        } else {
+          current.push(byte[0]);
+        }
+      }
+    }
+
+    let dl_status = child
+      .wait()
+      .map_err(|e| format!("等待模型下载结束失败: {e}"))?;
+    if !dl_status.success() {
       let _ = fs::remove_file(&archive);
-      let err = String::from_utf8_lossy(&dl.stderr);
       return Err(format!(
         "下载 Kokoro 模型失败: {}",
-        err.chars().take(200).collect::<String>()
+        last_err_line.chars().take(200).collect::<String>()
       ));
     }
+
+    emit_progress(
+      &app,
+      "model",
+      Some(90),
+      "下载完成，正在解压模型文件…",
+      Some(format!("{KOKORO_MODEL_ID}.tar.bz2")),
+    );
 
     let extract = Command::new("tar")
       .arg("-xjf")
@@ -339,6 +584,7 @@ pub async fn tts_download_model(app: AppHandle) -> Result<String, String> {
       ));
     }
 
+    emit_progress(&app, "model", Some(100), "Kokoro 模型已就绪", None);
     Ok(target_dir.to_string_lossy().to_string())
   })
   .await

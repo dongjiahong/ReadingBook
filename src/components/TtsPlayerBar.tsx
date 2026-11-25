@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import {
   Download,
   Headphones,
@@ -25,6 +26,13 @@ import {
   type TtsStatus,
 } from '../utils/ttsEngine';
 
+interface TtsProgressEvent {
+  task: 'runtime' | 'model';
+  percent: number | null;
+  stage: string;
+  log: string | null;
+}
+
 interface TtsPlayerBarProps {
   open: boolean;
   bookId: string;
@@ -50,7 +58,7 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
   );
 
   const [status, setStatus] = useState<TtsStatus | null>(null);
-  const [busyMsg, setBusyMsg] = useState<string | null>(null);
+  const [progress, setProgress] = useState<TtsProgressEvent | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
 
   const parsedInitial = useMemo(
@@ -95,6 +103,19 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
   }, [open, refreshStatus]);
 
   useEffect(() => {
+    if (!open) return;
+    let unlisten: (() => void) | null = null;
+    void listen<TtsProgressEvent>('tts-progress', (event) => {
+      setProgress(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [open]);
+
+  useEffect(() => {
     if (!open) {
       controllerRef.current?.dispose();
       controllerRef.current = null;
@@ -104,7 +125,9 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
 
     const ctrl = new SentenceTtsController((next) => {
       setPlayState(next);
-      onActiveParaRef.current?.(next.playing && next.sentence ? next.sentence.paragraphId : null);
+      onActiveParaRef.current?.(
+        next.playing && next.sentence ? next.sentence.paragraphId : null
+      );
       if (next.sentence) {
         const locator = JSON.stringify({
           paragraphId: next.sentence.paragraphId,
@@ -148,28 +171,38 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
   }, [onClose]);
 
   const handleInstallRuntime = async () => {
-    setBusyMsg('正在创建隔离环境并安装 sherpa-onnx（首次约 30-60 秒）…');
     setSetupError(null);
+    setProgress({
+      task: 'runtime',
+      percent: 5,
+      stage: '准备安装离线推理引擎 (sherpa-onnx)…',
+      log: null,
+    });
     try {
       await setupTtsRuntime();
       await refreshStatus();
     } catch (err) {
       setSetupError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusyMsg(null);
+      setProgress(null);
     }
   };
 
   const handleDownloadModel = async () => {
-    setBusyMsg('正在下载 Kokoro v1.1-zh 离线中英模型（int8 约 140MB）…');
     setSetupError(null);
+    setProgress({
+      task: 'model',
+      percent: 1,
+      stage: '准备下载 Kokoro v1.1-zh 中英模型…',
+      log: null,
+    });
     try {
       await downloadTtsModel();
       await refreshStatus();
     } catch (err) {
       setSetupError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusyMsg(null);
+      setProgress(null);
     }
   };
 
@@ -205,10 +238,28 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
 
       {!isReady ? (
         <div className="tts-bar__setup">
-          {busyMsg ? (
-            <div className="tts-bar__busy">
-              <Loader2 size={14} className="topbar__spinner" />
-              <span>{busyMsg}</span>
+          {progress ? (
+            <div className="tts-bar__progress-box">
+              <div className="tts-bar__progress-head">
+                <span className="tts-bar__progress-stage">
+                  <Loader2 size={13} className="topbar__spinner" />
+                  <span>{progress.stage}</span>
+                </span>
+                {progress.percent !== null && (
+                  <span className="tts-bar__progress-pct">{progress.percent}%</span>
+                )}
+              </div>
+              <div className="tts-bar__progress-track">
+                <div
+                  className="tts-bar__progress-fill"
+                  style={{ width: `${Math.min(100, Math.max(2, progress.percent ?? 15))}%` }}
+                />
+              </div>
+              {progress.log && (
+                <div className="tts-bar__progress-log" title={progress.log}>
+                  {progress.log}
+                </div>
+              )}
             </div>
           ) : (
             <div className="tts-bar__setup-actions">
