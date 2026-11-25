@@ -2,9 +2,19 @@ import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { join } from '@tauri-apps/api/path';
 import { open } from '@tauri-apps/plugin-dialog';
-import { FolderDown, FolderUp, X } from 'lucide-react';
+import {
+  Check,
+  FolderDown,
+  FolderUp,
+  Minus,
+  Plus,
+  RotateCcw,
+  SlidersHorizontal,
+  X,
+} from 'lucide-react';
 import { isDesktop } from '../services/library';
 import type { ReaderFont, ReaderSettings, ReaderTheme } from '../types';
+import { useIsMobileLayout } from '../utils/platform';
 
 interface SettingsPanelProps {
   open: boolean;
@@ -14,16 +24,24 @@ interface SettingsPanelProps {
   onChange: (patch: Partial<ReaderSettings>) => void;
 }
 
-const THEMES: { value: ReaderTheme; label: string }[] = [
-  { value: 'light', label: '浅色' },
-  { value: 'sepia', label: '护眼' },
-  { value: 'dark', label: '深色' },
+const THEMES: { value: ReaderTheme; label: string; bg: string; fg: string }[] = [
+  { value: 'light', label: '浅色', bg: '#ffffff', fg: '#1f2328' },
+  { value: 'sepia', label: '护眼', bg: '#f6eedc', fg: '#3a342a' },
+  { value: 'dark', label: '深色', bg: '#1b1f24', fg: '#e5eaf0' },
 ];
 
 const FONTS: { value: ReaderFont; label: string; stack: string }[] = [
-  { value: 'system', label: '系统', stack: 'inherit' },
-  { value: 'serif', label: '宋体', stack: "'Songti SC', SimSun, serif" },
-  { value: 'sans', label: '黑体', stack: "'PingFang SC', 'Heiti SC', sans-serif" },
+  {
+    value: 'system',
+    label: '系统默认',
+    stack: "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif",
+  },
+  { value: 'serif', label: '宋体', stack: "'Songti SC', 'Noto Serif SC', SimSun, serif" },
+  {
+    value: 'sans',
+    label: '黑体',
+    stack: "'PingFang SC', 'Noto Sans SC', 'Heiti SC', sans-serif",
+  },
 ];
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
@@ -33,6 +51,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onClose,
   onChange,
 }) => {
+  const isMobile = useIsMobileLayout();
   const [backupStatus, setBackupStatus] = useState<{
     kind: 'ok' | 'err';
     text: string;
@@ -52,6 +71,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
+
+  const activeFontStack =
+    FONTS.find((f) => f.value === settings.fontFamily)?.stack ?? FONTS[0].stack;
+  const activeThemeMeta =
+    THEMES.find((t) => t.value === settings.theme) ?? THEMES[0];
+
+  const stepFontSize = (delta: number) => {
+    const next = Math.min(22, Math.max(13, settings.fontSize + delta));
+    onChange({ fontSize: next });
+  };
+
+  const stepLineHeight = (delta: number) => {
+    const next = Math.round(Math.min(2.4, Math.max(1.4, settings.lineHeight + delta)) * 100) / 100;
+    onChange({ lineHeight: next });
+  };
 
   const handleBackupLibrary = async () => {
     setBackupBusy(true);
@@ -106,13 +140,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   return (
     <div className="settings-backdrop" onClick={onClose}>
       <div
-        className="settings-panel"
+        className={`settings-panel settings-v2 ${isMobile ? 'is-sheet' : ''}`}
         role="dialog"
         aria-label="阅读设置"
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="settings-panel__header">
-          <h2>阅读设置</h2>
+        {isMobile && <div className="settings-v2__handle" aria-hidden="true" />}
+
+        <header className="settings-v2__header">
+          <div className="settings-v2__title">
+            <SlidersHorizontal size={15} />
+            <h2>阅读设置</h2>
+          </div>
           <button
             type="button"
             className="topbar__icon-btn"
@@ -123,34 +162,63 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           </button>
         </header>
 
-        <div className="settings-panel__body">
-          <section className="settings-row">
-            <div className="settings-row__label">主题</div>
-            <div className="theme-picker">
-              {THEMES.map((theme) => (
-                <button
-                  key={theme.value}
-                  type="button"
-                  className={`theme-picker__swatch theme-picker__swatch--${theme.value} ${
-                    settings.theme === theme.value ? 'is-active' : ''
-                  }`}
-                  onClick={() => onChange({ theme: theme.value })}
-                >
-                  <span className="theme-picker__preview" />
-                  {theme.label}
-                </button>
-              ))}
+        <div className="settings-v2__body">
+          {/* Live Typography Preview */}
+          <div
+            className="settings-preview"
+            style={{
+              background: activeThemeMeta.bg,
+              color: activeThemeMeta.fg,
+              fontFamily: activeFontStack,
+              fontSize: `${settings.fontSize}px`,
+              lineHeight: settings.lineHeight,
+            }}
+          >
+            <div className="settings-preview__badge">排版预览</div>
+            阅读不是被动接收，而是在字里行间建立属于自己的思考网络。
+          </div>
+
+          {/* Appearance Card */}
+          <section className="settings-card">
+            <div className="settings-card__title">外观主题</div>
+            <div className="theme-picker-v2">
+              {THEMES.map((theme) => {
+                const active = settings.theme === theme.value;
+                return (
+                  <button
+                    key={theme.value}
+                    type="button"
+                    className={`theme-tile ${active ? 'is-active' : ''}`}
+                    onClick={() => onChange({ theme: theme.value })}
+                  >
+                    <span
+                      className="theme-tile__sample"
+                      style={{ background: theme.bg, color: theme.fg }}
+                    >
+                      Aa
+                      {active && (
+                        <span className="theme-tile__check">
+                          <Check size={10} />
+                        </span>
+                      )}
+                    </span>
+                    <span className="theme-tile__label">{theme.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </section>
 
-          <section className="settings-row">
-            <div className="settings-row__label">字体</div>
-            <div className="font-picker">
+          {/* Typography Card */}
+          <section className="settings-card">
+            <div className="settings-card__title">字体与排版</div>
+
+            <div className="font-segmented">
               {FONTS.map((font) => (
                 <button
                   key={font.value}
                   type="button"
-                  className={`font-picker__btn ${
+                  className={`font-segmented__item ${
                     settings.fontFamily === font.value ? 'is-active' : ''
                   }`}
                   style={{ fontFamily: font.stack }}
@@ -160,59 +228,103 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </button>
               ))}
             </div>
-          </section>
 
-          <section className="settings-row">
-            <div className="settings-row__label">
-              正文字号
-              <span className="settings-row__value">{settings.fontSize}px</span>
+            <div className="settings-control">
+              <div className="settings-control__head">
+                <span>正文字号</span>
+                <span className="settings-pill-val">{settings.fontSize}px</span>
+              </div>
+              <div className="settings-slider-row">
+                <button
+                  type="button"
+                  className="settings-step-btn"
+                  aria-label="减小字号"
+                  onClick={() => stepFontSize(-1)}
+                >
+                  <Minus size={13} />
+                </button>
+                <input
+                  type="range"
+                  className="settings-range"
+                  min={13}
+                  max={22}
+                  step={1}
+                  value={settings.fontSize}
+                  onChange={(event) => onChange({ fontSize: Number(event.target.value) })}
+                />
+                <button
+                  type="button"
+                  className="settings-step-btn"
+                  aria-label="增大字号"
+                  onClick={() => stepFontSize(1)}
+                >
+                  <Plus size={13} />
+                </button>
+              </div>
             </div>
-            <input
-              type="range"
-              min={13}
-              max={22}
-              step={1}
-              value={settings.fontSize}
-              onChange={(event) => onChange({ fontSize: Number(event.target.value) })}
-            />
-          </section>
 
-          <section className="settings-row">
-            <div className="settings-row__label">
-              行高
-              <span className="settings-row__value">{settings.lineHeight.toFixed(2)}</span>
+            <div className="settings-control">
+              <div className="settings-control__head">
+                <span>段落行高</span>
+                <span className="settings-pill-val">{settings.lineHeight.toFixed(2)}</span>
+              </div>
+              <div className="settings-slider-row">
+                <button
+                  type="button"
+                  className="settings-step-btn"
+                  aria-label="减小行高"
+                  onClick={() => stepLineHeight(-0.05)}
+                >
+                  <Minus size={13} />
+                </button>
+                <input
+                  type="range"
+                  className="settings-range"
+                  min={1.4}
+                  max={2.4}
+                  step={0.05}
+                  value={settings.lineHeight}
+                  onChange={(event) =>
+                    onChange({ lineHeight: Number(event.target.value) })
+                  }
+                />
+                <button
+                  type="button"
+                  className="settings-step-btn"
+                  aria-label="增大行高"
+                  onClick={() => stepLineHeight(0.05)}
+                >
+                  <Plus size={13} />
+                </button>
+              </div>
             </div>
-            <input
-              type="range"
-              min={1.4}
-              max={2.4}
-              step={0.05}
-              value={settings.lineHeight}
-              onChange={(event) => onChange({ lineHeight: Number(event.target.value) })}
-            />
+
+            {!isMobile && (
+              <div className="settings-control">
+                <div className="settings-control__head">
+                  <span>书页宽度</span>
+                  <span className="settings-pill-val">{settings.bookWidth}px</span>
+                </div>
+                <input
+                  type="range"
+                  className="settings-range"
+                  min={380}
+                  max={900}
+                  step={10}
+                  value={settings.bookWidth}
+                  onChange={(event) => onChange({ bookWidth: Number(event.target.value) })}
+                />
+                <p className="settings-control__hint">
+                  阅读时可直接拖拽书页右边缘调整，松手自动记住。
+                </p>
+              </div>
+            )}
           </section>
 
-          <section className="settings-row">
-            <div className="settings-row__label">
-              书页宽度
-              <span className="settings-row__value">{settings.bookWidth}px</span>
-            </div>
-            <input
-              type="range"
-              min={380}
-              max={900}
-              step={10}
-              value={settings.bookWidth}
-              onChange={(event) => onChange({ bookWidth: Number(event.target.value) })}
-            />
-            <p className="settings-row__hint">
-              阅读时也可以拖拽书页右边缘临时调整，松手后自动记住。
-            </p>
-          </section>
-
-          {isDesktop() && (
-            <section className="settings-row">
-              <div className="settings-row__label">整库数据备份与恢复</div>
+          {/* Data Backup Card (Desktop only; mobile uses WiFi LAN Sync) */}
+          {isDesktop() && !isMobile && (
+            <section className="settings-card">
+              <div className="settings-card__title">整库数据备份</div>
               <div className="settings-backup-actions">
                 <button
                   type="button"
@@ -220,7 +332,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   disabled={backupBusy}
                   onClick={() => void handleBackupLibrary()}
                 >
-                  <FolderDown size={13} />
+                  <FolderDown size={14} />
                   <span>导出整库备份</span>
                 </button>
                 <button
@@ -229,7 +341,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   disabled={backupBusy}
                   onClick={() => void handleRestoreLibrary()}
                 >
-                  <FolderUp size={13} />
+                  <FolderUp size={14} />
                   <span>从备份恢复</span>
                 </button>
               </div>
@@ -242,22 +354,23 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   {backupStatus.text}
                 </p>
               )}
-              <p className="settings-row__hint">
-                包含全部书籍、批注数据库与卡片附图，换机或重装系统时可一键迁移。
+              <p className="settings-control__hint">
+                含全部书籍、批注数据库与卡片附图，换机或重装时一键迁移。
               </p>
             </section>
           )}
         </div>
 
-        <footer className="settings-panel__footer">
+        <footer className="settings-v2__footer">
           <button
             type="button"
-            className="settings-panel__reset"
+            className="settings-v2__reset"
             onClick={() => onChange({ ...defaults })}
           >
-            恢复默认
+            <RotateCcw size={13} />
+            <span>恢复默认</span>
           </button>
-          <button type="button" className="settings-panel__done" onClick={onClose}>
+          <button type="button" className="settings-v2__done" onClick={onClose}>
             完成
           </button>
         </footer>

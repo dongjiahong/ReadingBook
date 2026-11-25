@@ -24,6 +24,9 @@ export interface TtsLocator {
 
 export interface TtsVoicePreset {
   id: string;
+  name: string;
+  desc: string;
+  gender: 'female' | 'male';
   label: string;
   lang: 'zh' | 'en';
 }
@@ -31,13 +34,55 @@ export interface TtsVoicePreset {
 /** Top 3 community-favorite female + top 3 male Edge Neural voices (ZH + Bilingual). */
 export const EDGE_VOICES: TtsVoicePreset[] = [
   // 女声 Top 3
-  { id: 'zh-CN-XiaoxiaoNeural', label: '女 · 晓晓（温暖自然）', lang: 'zh' },
-  { id: 'zh-CN-XiaoyiNeural', label: '女 · 晓伊（柔和耐听）', lang: 'zh' },
-  { id: 'en-US-AvaMultilingualNeural', label: '女 · Ava（中英双语）', lang: 'en' },
+  {
+    id: 'zh-CN-XiaoxiaoNeural',
+    name: '晓晓',
+    desc: '温暖自然 · 通用首选',
+    gender: 'female',
+    label: '女 · 晓晓（温暖自然）',
+    lang: 'zh',
+  },
+  {
+    id: 'zh-CN-XiaoyiNeural',
+    name: '晓伊',
+    desc: '柔和耐听 · 适合长读',
+    gender: 'female',
+    label: '女 · 晓伊（柔和耐听）',
+    lang: 'zh',
+  },
+  {
+    id: 'en-US-AvaMultilingualNeural',
+    name: 'Ava',
+    desc: '中英双语 · 流畅自然',
+    gender: 'female',
+    label: '女 · Ava（中英双语）',
+    lang: 'en',
+  },
   // 男声 Top 3
-  { id: 'zh-CN-YunxiNeural', label: '男 · 云希（清朗故事）', lang: 'zh' },
-  { id: 'zh-CN-YunjianNeural', label: '男 · 云健（沉稳播音）', lang: 'zh' },
-  { id: 'en-US-AndrewMultilingualNeural', label: '男 · Andrew（中英双语）', lang: 'en' },
+  {
+    id: 'zh-CN-YunxiNeural',
+    name: '云希',
+    desc: '清朗有声 · 叙事感强',
+    gender: 'male',
+    label: '男 · 云希（清朗故事）',
+    lang: 'zh',
+  },
+  {
+    id: 'zh-CN-YunjianNeural',
+    name: '云健',
+    desc: '沉稳磁性 · 播音质感',
+    gender: 'male',
+    label: '男 · 云健（沉稳播音）',
+    lang: 'zh',
+  },
+  {
+    id: 'en-US-AndrewMultilingualNeural',
+    name: 'Andrew',
+    desc: '中英双语 · 沉稳清晰',
+    gender: 'male',
+    label: '男 · Andrew（中英双语）',
+    lang: 'en',
+  },
 ];
 
 export const DEFAULT_EDGE_VOICE = EDGE_VOICES[0].id;

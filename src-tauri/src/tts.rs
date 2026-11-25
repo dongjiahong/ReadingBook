@@ -1,60 +1,40 @@
-use std::sync::{Mutex, OnceLock};
-
-use msedge_tts::tts::client::connect;
-use msedge_tts::tts::SpeechConfig;
-use msedge_tts::voice::{get_voices_list, Voice};
+use kothok_edge_tts::{init_tls, EdgeTts, Engine, TtsEvent};
 use tauri::ipc::Response;
 
-static VOICE_CACHE: OnceLock<Mutex<Option<Vec<Voice>>>> = OnceLock::new();
-
-fn resolve_speech_config(voice_short_name: &str) -> Result<SpeechConfig, String> {
-  let cache = VOICE_CACHE.get_or_init(|| Mutex::new(None));
-  let mut guard = cache
-    .lock()
-    .map_err(|_| "语音列表锁异常".to_string())?;
-
-  if guard.is_none() {
-    let voices = get_voices_list()
-      .map_err(|e| format!("获取 Edge 语音列表失败（请检查网络/代理）: {e}"))?;
-    *guard = Some(voices);
+fn voice_locale(voice: &str) -> &'static str {
+  if voice.starts_with("en-US") {
+    "en-US"
+  } else {
+    "zh-CN"
   }
-
-  let voices = guard.as_ref().ok_or("语音列表为空")?;
-  let matched = voices
-    .iter()
-    .find(|v| v.name.contains(voice_short_name))
-    .or_else(|| voices.iter().find(|v| v.name.contains("XiaoxiaoNeural")))
-    .or_else(|| voices.first())
-    .ok_or_else(|| format!("未找到音色: {voice_short_name}"))?;
-
-  Ok(SpeechConfig::from(matched))
 }
 
-/// Online Microsoft Edge Neural TTS synthesis (via `msedge-tts`).
-/// Runs on a background blocking thread and returns raw MP3 bytes via Tauri binary IPC.
+/// Online Microsoft Edge Neural TTS synthesis via `kothok-edge-tts`
+/// (tokio + rustls/ring + webpki-roots — works identically on macOS and Android
+/// without platform-verifier JNI initialization or extra voice-list locks).
 #[tauri::command]
-pub async fn tts_synthesize(
-  text: String,
-  voice: String,
-) -> Result<Response, String> {
-  tauri::async_runtime::spawn_blocking(move || {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-      return Err("待朗读文本为空".into());
-    }
+pub async fn tts_synthesize(text: String, voice: String) -> Result<Response, String> {
+  let trimmed = text.trim();
+  if trimmed.is_empty() {
+    return Err("待朗读文本为空".into());
+  }
 
-    let config = resolve_speech_config(&voice)?;
-    let mut client = connect()
-      .map_err(|e| format!("连接 Edge TTS 服务失败（请检查网络/代理）: {e}"))?;
-    let audio = client
-      .synthesize(trimmed, &config)
-      .map_err(|e| format!("语音合成失败: {e}"))?;
+  init_tls();
 
-    if audio.audio_bytes.is_empty() {
-      return Err("未收到语音音频数据".into());
+  let events = EdgeTts
+    .synthesize(trimmed, &voice, "+0%", voice_locale(&voice))
+    .await
+    .map_err(|e| format!("Edge TTS 合成失败（请检查网络/代理）: {e}"))?;
+
+  let mut audio = Vec::<u8>::with_capacity(32 * 1024);
+  for ev in events {
+    if let TtsEvent::Audio(bytes) = ev {
+      audio.extend_from_slice(&bytes);
     }
-    Ok(Response::new(audio.audio_bytes))
-  })
-  .await
-  .map_err(|e| format!("语音合成任务异常: {e}"))?
+  }
+
+  if audio.is_empty() {
+    return Err("未收到语音音频数据".into());
+  }
+  Ok(Response::new(audio))
 }
