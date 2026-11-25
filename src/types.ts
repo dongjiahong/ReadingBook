@@ -26,6 +26,8 @@ export interface BookAnchor {
   kind: CardKind;
   /** 关联的批注卡片；基础标注（仅高亮/划线）没有卡片。 */
   targetNodeId?: string;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface CardImage {
@@ -37,6 +39,8 @@ export interface CardImage {
   filePath?: string;
   /** 桌面端缩略图相对路径（位于 $APPDATA/images/）。 */
   thumbPath?: string;
+  /** 原图内容哈希，用于局域网增量同步去重。 */
+  sha256?: string;
 }
 
 export interface AnnotationCardItem {
@@ -55,6 +59,11 @@ export interface AnnotationCardItem {
   collapsed?: boolean;
   /** 单卡自定义宽度（px，默认 248，可拖拽右边缘调整或切换宽卡）。 */
   width?: number;
+  /** 移动端新建卡片时置 true，同步回桌面端后自动触发一次防重叠排版。 */
+  needsLayout?: boolean;
+  layoutUpdatedAt?: number;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface CardEdge {
@@ -62,6 +71,8 @@ export interface CardEdge {
   source: string;
   target: string;
   color?: string;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface DraggingWireState {
@@ -81,8 +92,10 @@ export interface BookRecord {
   format: 'epub' | 'pdf';
   /** Path relative to the app data directory, e.g. `books/<id>.epub`. */
   filePath: string;
+  fileSha256?: string | null;
   /** Path relative to the app data directory, e.g. `covers/<id>.jpg`. */
   coverPath: string | null;
+  coverSha256?: string | null;
   totalParagraphs: number;
   addedAt: number;
   lastOpenedAt: number | null;
@@ -90,6 +103,19 @@ export interface BookRecord {
   progress: number;
   /** JSON string with scroll offsets so reopening resumes in place. */
   locator: string | null;
+  progressUpdatedAt?: number | null;
+  /** JSON string with TTS playback position (paragraphId + sentenceIndex). */
+  ttsLocator?: string | null;
+  updatedAt?: number;
+}
+
+export interface SyncPeerRecord {
+  deviceId: string;
+  deviceName: string;
+  pairingSecret: string;
+  lastSyncAt: number;
+  lastIp: string | null;
+  lastPort: number | null;
 }
 
 export type ReaderTheme = 'light' | 'sepia' | 'dark';
