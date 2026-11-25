@@ -7,7 +7,7 @@ dist/
 
 # rust / tauri build output
 src-tauri/target/
-src-tauri/gen/schemas/
+src-tauri/gen/
 
 # local sample books (large binaries, not part of the repo)
 books/
