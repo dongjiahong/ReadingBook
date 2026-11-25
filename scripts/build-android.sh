@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-click Tauri 2 Android (arm64) APK build + optional WiFi ADB install script.
+# One-click Tauri 2 Android (arm64) release APK build + signing + optional WiFi ADB install.
 #
 # Usage:
-#   ./scripts/build-android.sh                        # Build arm64 debug APK only
-#   ./scripts/build-android.sh --install              # Build and install to connected adb device
-#   ./scripts/build-android.sh --install 192.168.1.50:5555  # Connect via WiFi ADB and install
+#   ./scripts/build-android.sh                             # Build & sign arm64 release APK
+#   ./scripts/build-android.sh --install                   # Build, sign & install to connected adb device
+#   ./scripts/build-android.sh --install 192.168.1.50:5555 # Connect via WiFi ADB and install
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -90,17 +90,66 @@ if [[ ! -d "$ROOT_DIR/src-tauri/gen/android" ]]; then
   npx tauri android init
 fi
 
-# 4. Build arm64 debug APK (fast, auto-signed, ready for adb install)
-echo "[STEP] Building ReadingBook arm64 APK..."
-npx tauri android build --apk --target aarch64 --debug
+# 3.5 Sync Android launcher icons from readingbook.png
+if [[ -f "$ROOT_DIR/readingbook.png" ]]; then
+  echo "[STEP] Syncing Android launcher icons from readingbook.png..."
+  npx tauri icon "$ROOT_DIR/readingbook.png" >/dev/null
+fi
 
-APK_PATH="$(find "$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk" -name '*.apk' -type f | head -n 1)"
-if [[ -z "$APK_PATH" || ! -f "$APK_PATH" ]]; then
-  echo "[ERROR] APK not found after build." >&2
+# 4. Build arm64 release APK
+echo "[STEP] Building ReadingBook arm64 release APK..."
+npx tauri android build --apk --target aarch64
+
+APK_DIR="$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk/arm64/release"
+RAW_APK="$(find "$APK_DIR" -maxdepth 1 -name '*.apk' ! -name '*-signed.apk' ! -name '*-aligned.apk' -type f | head -n 1)"
+if [[ -z "$RAW_APK" || ! -f "$RAW_APK" ]]; then
+  RAW_APK="$(find "$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk" -path '*/release/*.apk' ! -name '*-signed.apk' ! -name '*-aligned.apk' -type f | head -n 1)"
+fi
+if [[ -z "$RAW_APK" || ! -f "$RAW_APK" ]]; then
+  echo "[ERROR] Release APK not found after build." >&2
   exit 1
 fi
 
-echo "[OK] Built APK: $APK_PATH"
+# 4.5 Sign release APK with persistent local keystore so adb install -r works cleanly
+BUILD_TOOLS_DIR=""
+if [[ -d "$ANDROID_HOME/build-tools" ]]; then
+  LATEST_BT="$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+  [[ -n "$LATEST_BT" ]] && BUILD_TOOLS_DIR="$ANDROID_HOME/build-tools/$LATEST_BT"
+fi
+if [[ -z "$BUILD_TOOLS_DIR" || ! -x "$BUILD_TOOLS_DIR/apksigner" ]]; then
+  echo "[ERROR] Android build-tools (apksigner/zipalign) not found under $ANDROID_HOME/build-tools." >&2
+  exit 1
+fi
+
+KEYSTORE_PATH="${READINGBOOK_KEYSTORE:-$HOME/.readingbook-android-release.jks}"
+KEY_ALIAS="${READINGBOOK_KEY_ALIAS:-readingbook}"
+KEY_PASS="${READINGBOOK_KEY_PASS:-readingbook-local-release}"
+
+if [[ ! -f "$KEYSTORE_PATH" ]]; then
+  echo "[STEP] Generating local release keystore at $KEYSTORE_PATH..."
+  keytool -genkeypair -v \
+    -keystore "$KEYSTORE_PATH" \
+    -alias "$KEY_ALIAS" \
+    -keyalg RSA -keysize 2048 -validity 10000 \
+    -storepass "$KEY_PASS" -keypass "$KEY_PASS" \
+    -dname "CN=ReadingBook, OU=Personal, O=ReadingBook, L=Local, S=Local, C=CN"
+fi
+
+ALIGNED_APK="${RAW_APK%.apk}-aligned.apk"
+SIGNED_APK="${RAW_APK%.apk}-signed.apk"
+
+echo "[STEP] Zipaligning & signing release APK..."
+"$BUILD_TOOLS_DIR/zipalign" -p -f 4 "$RAW_APK" "$ALIGNED_APK"
+"$BUILD_TOOLS_DIR/apksigner" sign \
+  --ks "$KEYSTORE_PATH" \
+  --ks-key-alias "$KEY_ALIAS" \
+  --ks-pass "pass:$KEY_PASS" \
+  --key-pass "pass:$KEY_PASS" \
+  --out "$SIGNED_APK" \
+  "$ALIGNED_APK"
+rm -f "$ALIGNED_APK"
+
+echo "[OK] Built & signed release APK: $SIGNED_APK"
 
 # 5. Optional WiFi ADB install
 if [[ "$DO_INSTALL" == "true" ]]; then
@@ -108,10 +157,10 @@ if [[ "$DO_INSTALL" == "true" ]]; then
     echo "[STEP] Connecting to WiFi ADB device $ADB_TARGET..."
     adb connect "$ADB_TARGET"
   fi
-  echo "[STEP] Installing APK to device..."
+  echo "[STEP] Installing release APK to device..."
   adb devices
-  adb install -r "$APK_PATH"
+  adb install -r "$SIGNED_APK"
   echo "[STEP] Launching ReadingBook on phone..."
-  adb shell monkey -p com.readingbook.app.debug -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
-  echo "[DONE] ReadingBook installed and launched!"
+  adb shell monkey -p com.readingbook.app -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+  echo "[DONE] ReadingBook release APK installed and launched!"
 fi

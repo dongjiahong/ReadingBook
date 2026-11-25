@@ -6,6 +6,8 @@ import {
   Plus,
   Settings,
   Trash2,
+  Upload,
+  Wifi,
 } from 'lucide-react';
 import { loadAllBookAnnotations } from '../services/db';
 import { getCoverUrl } from '../services/library';
@@ -16,10 +18,12 @@ interface ShelfViewProps {
   desktop: boolean;
   importing: boolean;
   error: string | null;
+  isDragOver?: boolean;
   onImport: () => void;
   onOpen: (book: BookRecord) => void;
   onDelete: (book: BookRecord) => void;
   onOpenSettings: () => void;
+  onOpenSync: () => void;
 }
 
 interface BookStats {
@@ -33,10 +37,12 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
   desktop,
   importing,
   error,
+  isDragOver = false,
   onImport,
   onOpen,
   onDelete,
   onOpenSettings,
+  onOpenSync,
 }) => {
   const [statsByBook, setStatsByBook] = useState<Record<string, BookStats>>({});
 
@@ -90,6 +96,16 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
             )}
             {importing ? '导入中…' : '导入书籍'}
           </button>
+          {desktop && (
+            <button
+              type="button"
+              className="topbar__icon-btn"
+              title="WiFi 局域网同步"
+              onClick={onOpenSync}
+            >
+              <Wifi size={15} />
+            </button>
+          )}
           <button
             type="button"
             className="topbar__icon-btn"
@@ -100,6 +116,16 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
           </button>
         </div>
       </header>
+
+      {isDragOver && (
+        <div className="shelf-drop-overlay" aria-live="polite">
+          <div className="shelf-drop-overlay__card">
+            <Upload size={26} />
+            <strong>松开鼠标导入书籍</strong>
+            <span>支持将 .epub / .pdf 直接拖入书架</span>
+          </div>
+        </div>
+      )}
 
       <main className="shelf__body">
         {!desktop && (
@@ -148,7 +174,7 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
 
         {desktop && books.length === 0 && (
           <p className="shelf__hint">
-            书库是空的。导入的书会复制到应用数据目录，批注、阅读进度和设置都保存在本地 SQLite。
+            书库是空的。点击上方导入或直接将 .epub / .pdf 拖到窗口中，批注与进度均保存在本地 SQLite。
           </p>
         )}
       </main>

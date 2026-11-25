@@ -120,22 +120,10 @@ async function toShelfCover(bytes: Uint8Array, mime: string): Promise<Uint8Array
 }
 
 /**
- * Opens a file dialog, validates the book, copies it into the app data folder
- * and records it in SQLite. Returns null when the user cancels.
+ * Validates a book file at the given path (or Android content:// URI), copies
+ * it into the app data folder, and records it in SQLite.
  */
-export async function importBookFromDisk(): Promise<BookRecord | null> {
-  const selected = await open({
-    multiple: false,
-    directory: false,
-    filters: [
-      { name: '电子书', extensions: ['epub', 'pdf'] },
-      { name: 'EPUB', extensions: ['epub'] },
-      { name: 'PDF', extensions: ['pdf'] },
-    ],
-  });
-  if (!selected || Array.isArray(selected)) return null;
-
-  const sourcePath = selected;
+export async function importBookFromPath(sourcePath: string): Promise<BookRecord> {
   const rawBaseName = await basename(sourcePath).catch(() => 'book');
   const fileName = decodeURIComponent(rawBaseName);
   const bytes = await readFile(sourcePath);
@@ -228,6 +216,24 @@ export async function importBookFromDisk(): Promise<BookRecord | null> {
   };
   await insertBook(book);
   return book;
+}
+
+/**
+ * Opens a file dialog, validates the book, copies it into the app data folder
+ * and records it in SQLite. Returns null when the user cancels.
+ */
+export async function importBookFromDisk(): Promise<BookRecord | null> {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: '电子书', extensions: ['epub', 'pdf'] },
+      { name: 'EPUB', extensions: ['epub'] },
+      { name: 'PDF', extensions: ['pdf'] },
+    ],
+  });
+  if (!selected || Array.isArray(selected)) return null;
+  return importBookFromPath(selected);
 }
 
 export async function getCoverUrl(book: BookRecord): Promise<string | null> {

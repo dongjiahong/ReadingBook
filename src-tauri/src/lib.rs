@@ -1,3 +1,4 @@
+mod sync;
 mod tts;
 
 use std::fs::{self, File};
@@ -175,6 +176,7 @@ pub fn run() {
   }];
 
   tauri::Builder::default()
+    .manage(sync::SyncState::default())
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
@@ -189,7 +191,17 @@ pub fn run() {
       export_markdown_bundle,
       export_library_backup,
       restore_library_backup,
-      tts::tts_synthesize
+      tts::tts_synthesize,
+      sync::sync_start,
+      sync::sync_get_status,
+      sync::sync_register_peer_secret,
+      sync::sync_generate_pairing_code,
+      sync::sync_pair_with_peer,
+      sync::sync_ping_peer,
+      sync::sync_exchange_with_peer,
+      sync::sync_reply_exchange,
+      sync::sync_pull_file,
+      sync::sync_push_file
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
