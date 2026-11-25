@@ -460,8 +460,10 @@ async fn handle_http_client(
           write_http_response(&mut stream, 200, "application/json", reply_json.as_bytes()).await;
         }
         _ => {
-          let mut g = state.lock().unwrap();
-          g.pending_exchanges.remove(&req_id);
+          {
+            let mut g = state.lock().unwrap();
+            g.pending_exchanges.remove(&req_id);
+          }
           write_http_response(&mut stream, 500, "text/plain", b"exchange timeout").await;
         }
       }
