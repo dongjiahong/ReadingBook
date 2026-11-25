@@ -40,6 +40,7 @@ import {
   type ImageDimsMap,
 } from './utils/epubDimsCache';
 import { EpubImageLoader, parseEpubFile } from './utils/epubLoader';
+import { useBackHandler } from './utils/backStack';
 import {
   createFullImageUrl,
   deleteStoredImage,
@@ -167,6 +168,18 @@ export default function MobileReaderView({
       return null;
     });
   }, []);
+
+  // Layered Android back-gesture navigation: close top-most overlay first, then exit to shelf.
+  useBackHandler(true, onBack);
+  useBackHandler(showTts, () => {
+    setShowTts(false);
+    setTtsParagraphId(null);
+  });
+  useBackHandler(showToc, () => setShowToc(false));
+  useBackHandler(showReviewDrawer, () => setShowReviewDrawer(false));
+  useBackHandler(showSearch, () => setShowSearch(false));
+  useBackHandler(sheetAnchorId !== null, () => setSheetAnchorId(null));
+  useBackHandler(previewImage !== null, closePreview);
 
   const revokeCardUrls = useCallback((list: AnnotationCardItem[]) => {
     for (const card of list) {

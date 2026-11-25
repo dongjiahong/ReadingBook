@@ -8,6 +8,7 @@ import {
   X,
 } from 'lucide-react';
 import { ANCHOR_COLORS } from './SelectionPopover';
+import { useBackHandler } from '../utils/backStack';
 import { createFullImageUrl, revokeObjectUrlIfBlob } from '../utils/imageStore';
 import type {
   AnchorColor,
@@ -173,6 +174,9 @@ export const GalleryModal: React.FC<GalleryModalProps> = ({
       if (createdUrl) revokeObjectUrlIfBlob(createdUrl);
     };
   }, [open, activeItem]);
+
+  useBackHandler(open, onClose);
+  useBackHandler(open && activeIndex !== null, () => setActiveIndex(null));
 
   useEffect(() => {
     if (!open) {

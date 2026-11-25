@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { updateBookTtsLocator } from '../services/db';
 import type { BookParagraph } from '../types';
+import { useBackHandler } from '../utils/backStack';
 import {
   buildSentencesFromParagraphs,
   DEFAULT_EDGE_VOICE,
@@ -57,6 +58,8 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
   const [voice, setVoice] = useState<string>(parsedInitial?.voice ?? DEFAULT_EDGE_VOICE);
   const [speed, setSpeed] = useState<number>(parsedInitial?.speed ?? 1.0);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+
+  useBackHandler(open && voicePickerOpen, () => setVoicePickerOpen(false));
   const [playState, setPlayState] = useState<{
     playing: boolean;
     loading: boolean;

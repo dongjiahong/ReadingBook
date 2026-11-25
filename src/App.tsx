@@ -22,6 +22,7 @@ import {
 } from './services/library';
 import { initSyncHost } from './services/sync';
 import type { BookRecord, ReaderSettings } from './types';
+import { useBackHandler } from './utils/backStack';
 import { deleteStoredImage } from './utils/imageStore';
 import { isMacDesktopRuntime, useIsMobileLayout } from './utils/platform';
 
@@ -48,6 +49,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<BookRecord | null>(null);
   const progressTimerRef = useRef<number | null>(null);
+
+  useBackHandler(showSettings, () => setShowSettings(false));
+  useBackHandler(showSync, () => setShowSync(false));
+  useBackHandler(pendingDelete !== null, () => setPendingDelete(null));
 
   const refreshBooks = useCallback(async () => {
     if (!desktop) return;
