@@ -389,6 +389,8 @@ pub async fn tts_setup_runtime(app: AppHandle) -> Result<String, String> {
         "install",
         "--upgrade",
         "--only-binary=:all:",
+        "-i",
+        "https://pypi.org/simple",
         "--default-timeout",
         "25",
         "--retries",
