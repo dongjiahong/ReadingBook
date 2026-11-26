@@ -21,7 +21,13 @@ import {
   isDesktop,
   markBookOpenedNow,
 } from './services/library';
-import { initSyncHost } from './services/sync';
+import {
+  flushPendingSyncNow,
+  getSyncRuntimeSnapshot,
+  initSyncHost,
+  subscribeSyncRuntime,
+  type SyncRuntimeSnapshot,
+} from './services/sync';
 import type { BookRecord, ReaderSettings } from './types';
 import { useBackHandler } from './utils/backStack';
 import { cleanupOrphanImages, deleteStoredImage } from './utils/imageStore';
@@ -45,6 +51,9 @@ export default function App() {
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showSync, setShowSync] = useState(false);
+  const [syncRuntime, setSyncRuntime] = useState<SyncRuntimeSnapshot>(() =>
+    getSyncRuntimeSnapshot()
+  );
   const [isDragOver, setIsDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +123,7 @@ export default function App() {
   // Start WiFi LAN sync host (UDP discovery + embedded HTTP server) on Tauri runtimes
   useEffect(() => {
     if (!desktop) return;
+    const unsubRuntime = subscribeSyncRuntime(setSyncRuntime);
     let cleanup: (() => void) | null = null;
     let disposed = false;
     void initSyncHost(() => {
@@ -129,6 +139,7 @@ export default function App() {
       .catch((err) => console.warn('启动局域网同步服务失败', err));
     return () => {
       disposed = true;
+      unsubRuntime();
       cleanup?.();
     };
   }, [desktop, refreshBooks]);
@@ -267,8 +278,10 @@ export default function App() {
             key={activeBook.id}
             book={activeBook}
             settings={settings}
+            syncRuntime={syncRuntime}
             onBack={() => {
               setActiveBookId(null);
+              flushPendingSyncNow();
               void refreshBooks();
             }}
             onSwitchBook={(bookId) => {
@@ -276,6 +289,7 @@ export default function App() {
               if (target) void handleOpenBook(target);
             }}
             onOpenSettings={() => setShowSettings(true)}
+            onOpenSync={() => setShowSync(true)}
             onProgress={handleProgress}
           />
         ) : (
@@ -283,8 +297,10 @@ export default function App() {
             key={activeBook.id}
             book={activeBook}
             settings={settings}
+            syncRuntime={syncRuntime}
             onBack={() => {
               setActiveBookId(null);
+              flushPendingSyncNow();
               void refreshBooks();
             }}
             onSwitchBook={(bookId) => {
@@ -292,6 +308,7 @@ export default function App() {
               if (target) void handleOpenBook(target);
             }}
             onOpenSettings={() => setShowSettings(true)}
+            onOpenSync={() => setShowSync(true)}
             onSettingsChange={updateSettings}
             onProgress={handleProgress}
           />
@@ -300,9 +317,11 @@ export default function App() {
         <ShelfView
           books={books}
           desktop={desktop}
+          isMobile={isMobile}
           importing={importing}
           error={error}
           isDragOver={isDragOver}
+          syncRuntime={syncRuntime}
           onImport={handleImport}
           onOpen={handleOpenBook}
           onDelete={handleDeleteBook}

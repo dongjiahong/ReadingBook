@@ -7,18 +7,21 @@ import {
   Settings,
   Trash2,
   Upload,
-  Wifi,
 } from 'lucide-react';
 import { loadAllBookAnnotations } from '../services/db';
 import { getCoverUrl } from '../services/library';
+import type { SyncRuntimeSnapshot } from '../services/sync';
 import type { BookRecord } from '../types';
+import { SyncStatusBadge } from './SyncStatusBadge';
 
 interface ShelfViewProps {
   books: BookRecord[];
   desktop: boolean;
+  isMobile?: boolean;
   importing: boolean;
   error: string | null;
   isDragOver?: boolean;
+  syncRuntime: SyncRuntimeSnapshot;
   onImport: () => void;
   onOpen: (book: BookRecord) => void;
   onDelete: (book: BookRecord) => void;
@@ -35,9 +38,11 @@ interface BookStats {
 export const ShelfView: React.FC<ShelfViewProps> = ({
   books,
   desktop,
+  isMobile = false,
   importing,
   error,
   isDragOver = false,
+  syncRuntime,
   onImport,
   onOpen,
   onDelete,
@@ -97,14 +102,11 @@ export const ShelfView: React.FC<ShelfViewProps> = ({
             {importing ? '导入中…' : '导入书籍'}
           </button>
           {desktop && (
-            <button
-              type="button"
-              className="topbar__icon-btn"
-              title="WiFi 局域网同步"
+            <SyncStatusBadge
+              runtime={syncRuntime}
+              variant={isMobile ? 'icon' : 'pill'}
               onClick={onOpenSync}
-            >
-              <Wifi size={15} />
-            </button>
+            />
           )}
           <button
             type="button"

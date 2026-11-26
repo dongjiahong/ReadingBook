@@ -16,6 +16,28 @@ import type {
 
 const DB_URL = 'sqlite:readingbook.db';
 
+export type LocalDataChangeKind = 'content' | 'progress' | 'layout';
+
+type LocalChangeListener = (event: { kind: LocalDataChangeKind; bookId?: string }) => void;
+const localChangeListeners = new Set<LocalChangeListener>();
+
+export function subscribeLocalDataChange(listener: LocalChangeListener): () => void {
+  localChangeListeners.add(listener);
+  return () => {
+    localChangeListeners.delete(listener);
+  };
+}
+
+function emitLocalDataChange(kind: LocalDataChangeKind, bookId?: string): void {
+  for (const listener of localChangeListeners) {
+    try {
+      listener({ kind, bookId });
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
 let dbPromise: Promise<Database> | null = null;
 const saveQueues = new Map<string, Promise<void>>();
 
@@ -311,6 +333,7 @@ export async function insertBook(book: BookRecord): Promise<void> {
       now,
     ]
   );
+  emitLocalDataChange('content', book.id);
 }
 
 export async function deleteBookRecord(id: string): Promise<void> {
@@ -332,6 +355,7 @@ export async function deleteBookRecord(id: string): Promise<void> {
     'UPDATE books SET deleted_at = $1, updated_at = $1 WHERE id = $2',
     [now, id]
   );
+  emitLocalDataChange('content', id);
 }
 
 export async function markBookOpened(id: string, timestamp: number): Promise<void> {
@@ -353,6 +377,7 @@ export async function updateBookProgress(
     'UPDATE books SET progress = $1, progress_locator = $2, progress_updated_at = $3, updated_at = $3 WHERE id = $4',
     [progress, locator, now, id]
   );
+  emitLocalDataChange('progress', id);
 }
 
 export async function updateBookTtsLocator(
@@ -365,6 +390,7 @@ export async function updateBookTtsLocator(
     'UPDATE books SET tts_locator = $1, updated_at = $2 WHERE id = $3',
     [ttsLocator, now, id]
   );
+  emitLocalDataChange('progress', id);
 }
 
 export async function loadAnnotations(bookId: string): Promise<BookAnnotations | null> {
@@ -463,6 +489,8 @@ async function performSaveAnnotations(
   const nextAnchorIds = new Set<string>();
   const nextCardIds = new Set<string>();
   const nextEdgeIds = new Set<string>();
+  let hasContentChange = false;
+  let hasLayoutChange = false;
 
   for (const anchor of annotations.anchors) {
     nextAnchorIds.add(anchor.id);
@@ -496,6 +524,7 @@ async function performSaveAnnotations(
           now,
         ]
       );
+      hasContentChange = true;
     } else if (anchorChanged(prev, anchor, rectsJson)) {
       await db.execute(
         `UPDATE anchors SET
@@ -522,6 +551,7 @@ async function performSaveAnnotations(
           anchor.id,
         ]
       );
+      hasContentChange = true;
     }
   }
 
@@ -531,6 +561,7 @@ async function performSaveAnnotations(
         'UPDATE anchors SET deleted_at = $1, updated_at = $1 WHERE id = $2',
         [now, prev.id]
       );
+      hasContentChange = true;
     }
   }
 
@@ -566,6 +597,7 @@ async function performSaveAnnotations(
           now,
         ]
       );
+      hasContentChange = true;
     } else {
       const contentDiff = cardContentChanged(prev, card, imagesJson);
       const layoutDiff = cardLayoutChanged(prev, card);
@@ -597,6 +629,8 @@ async function performSaveAnnotations(
             card.id,
           ]
         );
+        if (contentDiff) hasContentChange = true;
+        else hasLayoutChange = true;
       }
     }
   }
@@ -607,6 +641,7 @@ async function performSaveAnnotations(
         'UPDATE cards SET deleted_at = $1, updated_at = $1 WHERE id = $2',
         [now, prev.id]
       );
+      hasContentChange = true;
     }
   }
 
@@ -621,6 +656,7 @@ async function performSaveAnnotations(
          VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)`,
         [edge.id, bookId, edge.source, edge.target, edge.color ?? null, createdAt, now]
       );
+      hasContentChange = true;
     } else if (edgeChanged(prev, edge)) {
       await db.execute(
         `UPDATE edges SET
@@ -629,6 +665,7 @@ async function performSaveAnnotations(
          WHERE id = $5`,
         [edge.source, edge.target, edge.color ?? null, now, edge.id]
       );
+      hasContentChange = true;
     }
   }
 
@@ -638,7 +675,14 @@ async function performSaveAnnotations(
         'UPDATE edges SET deleted_at = $1, updated_at = $1 WHERE id = $2',
         [now, prev.id]
       );
+      hasContentChange = true;
     }
+  }
+
+  if (hasContentChange) {
+    emitLocalDataChange('content', bookId);
+  } else if (hasLayoutChange) {
+    emitLocalDataChange('layout', bookId);
   }
 }
 

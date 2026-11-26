@@ -18,8 +18,13 @@ import { GalleryModal } from './components/GalleryModal';
 import { MobileNoteSheet } from './components/MobileNoteSheet';
 import { PdfBookPane, type PdfSource } from './components/PdfBookPane';
 import { SearchModal, type SearchResultAction } from './components/SearchModal';
+import { SyncStatusBadge } from './components/SyncStatusBadge';
 import { TtsPlayerBar } from './components/TtsPlayerBar';
 import { loadAnnotations, saveAnnotations } from './services/db';
+import {
+  subscribeRemoteSyncUpdates,
+  type SyncRuntimeSnapshot,
+} from './services/sync';
 import type {
   AnchorColor,
   AnnotationCardItem,
@@ -83,18 +88,22 @@ function parseLocator(locator: string | null): SavedLocator | null {
 interface MobileReaderViewProps {
   book: BookRecord;
   settings: ReaderSettings;
+  syncRuntime?: SyncRuntimeSnapshot;
   onBack: () => void;
   onSwitchBook?: (bookId: string) => void;
   onOpenSettings: () => void;
+  onOpenSync?: () => void;
   onProgress: (bookId: string, progress: number, locator: string) => void;
 }
 
 export default function MobileReaderView({
   book,
   settings,
+  syncRuntime,
   onBack,
   onSwitchBook,
   onOpenSettings,
+  onOpenSync,
   onProgress,
 }: MobileReaderViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -105,6 +114,7 @@ export default function MobileReaderView({
   const restoreScrollRef = useRef<SavedLocator | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const dirtyRef = useRef(false);
+  const suppressNextSaveRef = useRef(false);
   const epubDimsRef = useRef<ImageDimsMap>({});
   const epubDimsDirtyRef = useRef(false);
   const epubDimsTimerRef = useRef<number | null>(null);
@@ -124,6 +134,12 @@ export default function MobileReaderView({
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [readingProgress, setReadingProgress] = useState(book.progress ?? 0);
+  const readingProgressRef = useRef(readingProgress);
+  readingProgressRef.current = readingProgress;
+  const [remoteProgressPrompt, setRemoteProgressPrompt] = useState<{
+    progress: number;
+    locator: string | null;
+  } | null>(null);
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
     typeof window !== 'undefined' ? window.innerWidth : 390
   );
@@ -339,6 +355,10 @@ export default function MobileReaderView({
   useEffect(() => {
     latestRef.current = { bookId: book.id, anchors, cards, edges };
     if (!hydratedRef.current) return;
+    if (suppressNextSaveRef.current) {
+      suppressNextSaveRef.current = false;
+      return;
+    }
     dirtyRef.current = true;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(flushAnnotationsNow, 500);
@@ -349,6 +369,34 @@ export default function MobileReaderView({
       }
     };
   }, [book.id, anchors, cards, edges, flushAnnotationsNow]);
+
+  // Live-refresh annotations and prompt on remote reading progress updates
+  useEffect(() => {
+    return subscribeRemoteSyncUpdates((updates) => {
+      const match = updates.find((u) => u.bookId === book.id);
+      if (!match) return;
+      if (match.annotationsChanged) {
+        void loadAnnotations(book.id).then(async (saved) => {
+          const restoredCards = saved ? await restoreThumbUrls(saved.cards) : [];
+          suppressNextSaveRef.current = true;
+          setAnchors(saved?.anchors ?? []);
+          setCards(restoredCards);
+          setEdges(saved?.edges ?? []);
+        });
+      }
+      if (
+        match.progressChanged &&
+        match.locator &&
+        typeof match.progress === 'number' &&
+        Math.abs(match.progress - readingProgressRef.current) >= 0.01
+      ) {
+        setRemoteProgressPrompt({
+          progress: match.progress,
+          locator: match.locator,
+        });
+      }
+    });
+  }, [book.id]);
 
   useEffect(() => {
     const onBeforeUnload = () => flushAnnotationsNow();
@@ -823,6 +871,14 @@ export default function MobileReaderView({
         >
           <Search size={17} />
         </button>
+        {syncRuntime && onOpenSync && (
+          <SyncStatusBadge
+            runtime={syncRuntime}
+            variant="icon"
+            className="mobile-topbar__btn"
+            onClick={onOpenSync}
+          />
+        )}
         <button
           type="button"
           className="mobile-topbar__btn"
@@ -1085,6 +1141,44 @@ export default function MobileReaderView({
         onClose={() => setShowGallery(false)}
         onJump={handleSearchSelect}
       />
+
+      {remoteProgressPrompt && (
+        <div className="sync-progress-toast is-mobile" role="status" aria-live="polite">
+          <span>
+            对端已读到 {Math.round(remoteProgressPrompt.progress * 100)}%
+          </span>
+          <button
+            type="button"
+            className="sync-progress-toast__jump"
+            onClick={() => {
+              const parsed = parseLocator(remoteProgressPrompt.locator);
+              const scroller = scrollRef.current;
+              const host = contentHostRef.current;
+              if (scroller && parsed) {
+                if (host && parsed.paragraphId) {
+                  scrollToSelector(`[data-paragraph-id="${parsed.paragraphId}"]`);
+                } else if (host && parsed.pdfPage) {
+                  scrollToSelector(`[data-pdf-page="${parsed.pdfPage}"]`);
+                } else {
+                  scroller.scrollTo({ top: parsed.top, behavior: 'smooth' });
+                }
+              }
+              setReadingProgress(remoteProgressPrompt.progress);
+              setRemoteProgressPrompt(null);
+            }}
+          >
+            跳转
+          </button>
+          <button
+            type="button"
+            className="sync-progress-toast__close"
+            title="忽略"
+            onClick={() => setRemoteProgressPrompt(null)}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
 
       {previewImage && (
         <div className="image-lightbox-backdrop" onClick={closePreview}>

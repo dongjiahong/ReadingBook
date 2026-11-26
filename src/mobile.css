@@ -1705,3 +1705,319 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* ---------- Live Sync Status Badge, Switch & Remote Progress Toast ---------- */
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-subtle);
+  color: var(--text-main);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.sync-pill:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+}
+
+.sync-pill.is-syncing {
+  border-color: rgba(37, 99, 235, 0.32);
+  background: rgba(37, 99, 235, 0.08);
+  color: #2563eb;
+}
+
+.sync-pill.is-error {
+  border-color: rgba(220, 38, 38, 0.34);
+  background: rgba(220, 38, 38, 0.08);
+  color: #dc2626;
+}
+
+.sync-pill.is-pending {
+  border-color: rgba(217, 119, 6, 0.32);
+  background: rgba(217, 119, 6, 0.08);
+  color: #b45309;
+}
+
+.theme-dark .sync-pill.is-pending {
+  color: #fbbf24;
+}
+
+.sync-pill__icon {
+  flex-shrink: 0;
+}
+
+.sync-pill__label {
+  line-height: 1;
+}
+
+.sync-icon-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.sync-icon-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-main);
+  border-color: var(--border-subtle);
+}
+
+.sync-icon-btn.is-syncing {
+  color: #2563eb;
+}
+
+.sync-icon-btn.is-error {
+  color: #dc2626;
+}
+
+.sync-icon-btn__dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1.5px var(--bg-surface);
+}
+
+.mobile-topbar__btn.sync-icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  border: none;
+}
+
+.mobile-topbar__btn.sync-icon-btn .sync-icon-btn__dot {
+  top: 7px;
+  right: 7px;
+}
+
+.sync-state-dot,
+.sync-icon-btn__dot {
+  background: var(--border-strong);
+}
+
+.sync-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.sync-state-dot.is-synced,
+.sync-icon-btn__dot.is-synced {
+  background: #16a34a;
+}
+
+.sync-state-dot.is-pending,
+.sync-icon-btn__dot.is-pending {
+  background: #d97706;
+}
+
+.sync-state-dot.is-offline,
+.sync-icon-btn__dot.is-offline {
+  background: #9ca3af;
+}
+
+.sync-state-dot.is-error,
+.sync-icon-btn__dot.is-error {
+  background: #dc2626;
+}
+
+.sync-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+.sync-live-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+}
+
+.sync-live-card.is-syncing {
+  border-color: rgba(37, 99, 235, 0.32);
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.sync-live-card.is-error {
+  border-color: rgba(220, 38, 38, 0.32);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.sync-live-card__left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.sync-live-card__icon {
+  flex-shrink: 0;
+  color: #2563eb;
+}
+
+.sync-live-card.is-error .sync-live-card__icon {
+  color: #dc2626;
+}
+
+.sync-live-card__text {
+  min-width: 0;
+}
+
+.sync-live-card__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.sync-live-card__sub {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.sync-auto-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.sync-auto-row__text {
+  min-width: 0;
+}
+
+.sync-auto-row__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.sync-auto-row__desc {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.sync-switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  border: none;
+  background: var(--border-strong);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.18s ease;
+}
+
+.sync-switch.is-on {
+  background: #2563eb;
+}
+
+.sync-switch__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.18s ease;
+}
+
+.sync-switch.is-on .sync-switch__thumb {
+  transform: translateX(16px);
+}
+
+.sync-progress-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 125;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px 7px 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+  font-size: 12.5px;
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+
+.sync-progress-toast.is-mobile {
+  bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+}
+
+.sync-progress-toast__jump {
+  border: none;
+  border-radius: 999px;
+  padding: 4px 11px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sync-progress-toast__jump:hover {
+  background: #1d4ed8;
+}
+
+.sync-progress-toast__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sync-progress-toast__close:hover {
+  background: var(--hover-bg);
+  color: var(--text-main);
+}

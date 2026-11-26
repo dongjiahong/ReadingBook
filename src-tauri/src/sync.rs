@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 pub const UDP_DISCOVERY_PORT: u16 = 45888;
@@ -25,6 +25,7 @@ pub struct DiscoveredPeer {
   pub device_name: String,
   pub ip: String,
   pub http_port: u16,
+  pub data_rev: u64,
   pub last_seen_ms: u64,
 }
 
@@ -36,6 +37,7 @@ pub struct SyncStatus {
   pub http_port: u16,
   pub device_id: String,
   pub device_name: String,
+  pub data_rev: u64,
   pub discovered_peers: Vec<DiscoveredPeer>,
   pub active_pairing_code: Option<String>,
   pub pairing_expires_at: Option<u64>,
@@ -59,6 +61,31 @@ struct IncomingExchangeEvent {
   payload_json: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerSignalEvent {
+  device_id: String,
+  device_name: String,
+  ip: String,
+  http_port: u16,
+  data_rev: u64,
+  reason: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerOfflineEvent {
+  device_id: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IncomingActivityEvent {
+  peer_device_id: String,
+  phase: String,
+  path: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UdpBeacon {
@@ -67,6 +94,8 @@ struct UdpBeacon {
   device_id: String,
   device_name: String,
   http_port: u16,
+  #[serde(default)]
+  data_rev: u64,
 }
 
 #[derive(Default)]
@@ -75,11 +104,14 @@ struct SyncInner {
   device_id: String,
   device_name: String,
   http_port: u16,
+  data_rev: u64,
   discovered: HashMap<String, DiscoveredPeer>,
   pairing_code: Option<(String, u64)>,
   /// Paired peer secrets (`device_id -> pairing_secret`) synced from SQLite.
   peer_secrets: HashMap<String, String>,
   pending_exchanges: HashMap<String, oneshot::Sender<String>>,
+  /// Channel to wake the UDP broadcaster immediately (on local write or foreground resume).
+  announce_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
 #[derive(Clone, Default)]
@@ -94,7 +126,7 @@ fn now_ms() -> u64 {
     .unwrap_or(0)
 }
 
-/// Pure-Rust HMAC-SHA256 returning uppercase hex.
+/// Pure-Rust HMAC-SHA256 returning lowercase hex.
 fn hmac_sha256_hex(secret: &str, message: &str) -> String {
   const BLOCK_SIZE: usize = 64;
   let key_bytes = secret.as_bytes();
@@ -357,14 +389,15 @@ async fn handle_http_client(
 
   match (req.method.as_str(), path_only) {
     ("GET", "/sync/ping") => {
-      let (device_id, device_name) = {
+      let (device_id, device_name, data_rev) = {
         let g = state.lock().unwrap();
-        (g.device_id.clone(), g.device_name.clone())
+        (g.device_id.clone(), g.device_name.clone(), g.data_rev)
       };
       let body = serde_json::json!({
         "ok": true,
         "deviceId": device_id,
-        "deviceName": device_name
+        "deviceName": device_name,
+        "dataRev": data_rev
       })
       .to_string();
       write_http_response(&mut stream, 200, "application/json", body.as_bytes()).await;
@@ -438,6 +471,15 @@ async fn handle_http_client(
         }
       };
 
+      let _ = app.emit(
+        "sync-incoming-activity",
+        IncomingActivityEvent {
+          peer_device_id: peer_dev_id.clone(),
+          phase: "exchange".into(),
+          path: None,
+        },
+      );
+
       let req_id = Uuid::new_v4().to_string();
       let (tx, rx) = oneshot::channel::<String>();
       {
@@ -450,7 +492,7 @@ async fn handle_http_client(
         "sync-exchange-request",
         IncomingExchangeEvent {
           req_id: req_id.clone(),
-          peer_device_id: peer_dev_id,
+          peer_device_id: peer_dev_id.clone(),
           payload_json,
         },
       );
@@ -470,10 +512,13 @@ async fn handle_http_client(
     }
 
     ("GET", "/sync/file") => {
-      if let Err(msg) = verify_hmac(&state, &req) {
-        write_http_response(&mut stream, 401, "text/plain", msg.as_bytes()).await;
-        return;
-      }
+      let peer_dev_id = match verify_hmac(&state, &req) {
+        Ok(id) => id,
+        Err(msg) => {
+          write_http_response(&mut stream, 401, "text/plain", msg.as_bytes()).await;
+          return;
+        }
+      };
       let rel = match parse_query_param(&req.target, "path") {
         Some(p) => p,
         None => {
@@ -488,6 +533,14 @@ async fn handle_http_client(
           return;
         }
       };
+      let _ = app.emit(
+        "sync-incoming-activity",
+        IncomingActivityEvent {
+          peer_device_id: peer_dev_id,
+          phase: "file_out".into(),
+          path: Some(rel),
+        },
+      );
       match fs::read(&full_path) {
         Ok(bytes) => {
           write_http_response(&mut stream, 200, "application/octet-stream", &bytes).await;
@@ -499,10 +552,13 @@ async fn handle_http_client(
     }
 
     ("POST", "/sync/file") => {
-      if let Err(msg) = verify_hmac(&state, &req) {
-        write_http_response(&mut stream, 401, "text/plain", msg.as_bytes()).await;
-        return;
-      }
+      let peer_dev_id = match verify_hmac(&state, &req) {
+        Ok(id) => id,
+        Err(msg) => {
+          write_http_response(&mut stream, 401, "text/plain", msg.as_bytes()).await;
+          return;
+        }
+      };
       let rel = match parse_query_param(&req.target, "path") {
         Some(p) => p,
         None => {
@@ -521,7 +577,17 @@ async fn handle_http_client(
         let _ = fs::create_dir_all(parent);
       }
       match fs::write(&full_path, &req.body) {
-        Ok(_) => write_http_response(&mut stream, 200, "application/json", b"{\"ok\":true}").await,
+        Ok(_) => {
+          let _ = app.emit(
+            "sync-incoming-activity",
+            IncomingActivityEvent {
+              peer_device_id: peer_dev_id,
+              phase: "file_in".into(),
+              path: Some(rel),
+            },
+          );
+          write_http_response(&mut stream, 200, "application/json", b"{\"ok\":true}").await;
+        }
         Err(e) => {
           write_http_response(&mut stream, 500, "text/plain", e.to_string().as_bytes()).await;
         }
@@ -596,6 +662,32 @@ async fn send_http_request(
   Ok((status, raw[split + 4..].to_vec()))
 }
 
+async fn send_udp_beacon(sock: &UdpSocket, state: &Arc<Mutex<SyncInner>>) {
+  let beacon = {
+    let g = state.lock().unwrap();
+    UdpBeacon {
+      app: "readingbook".into(),
+      v: 2,
+      device_id: g.device_id.clone(),
+      device_name: g.device_name.clone(),
+      http_port: g.http_port,
+      data_rev: g.data_rev,
+    }
+  };
+  if let Ok(bytes) = serde_json::to_vec(&beacon) {
+    let _ = sock
+      .send_to(&bytes, ("255.255.255.255", UDP_DISCOVERY_PORT))
+      .await;
+    if let Some(local) = detect_local_ipv4() {
+      let octets = local.octets();
+      let directed = Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
+      let _ = sock
+        .send_to(&bytes, (directed, UDP_DISCOVERY_PORT))
+        .await;
+    }
+  }
+}
+
 #[tauri::command]
 pub async fn sync_start(
   app: AppHandle,
@@ -603,20 +695,26 @@ pub async fn sync_start(
   device_id: String,
   device_name: String,
   known_peers: Vec<(String, String)>,
+  data_rev: Option<u64>,
 ) -> Result<SyncStatus, String> {
-  let already_running = {
+  let (already_running, announce_rx) = {
     let mut g = state.inner.lock().map_err(|_| "状态锁异常")?;
     g.device_id = device_id.clone();
     g.device_name = device_name.clone();
+    if let Some(rev) = data_rev {
+      g.data_rev = rev;
+    }
     for (pid, secret) in known_peers {
       g.peer_secrets.insert(pid, secret);
     }
     if g.running {
-      true
+      (true, None)
     } else {
       g.running = true;
       g.http_port = HTTP_SYNC_PORT;
-      false
+      let (tx, rx) = mpsc::unbounded_channel();
+      g.announce_tx = Some(tx);
+      (false, Some(rx))
     }
   };
 
@@ -638,8 +736,10 @@ pub async fn sync_start(
       }
     });
 
-    // 2. Start UDP LAN Discovery (broadcast + listen)
+    // 2. Start UDP LAN Discovery (event-triggered + lightweight presence beacon)
     let udp_state = state.inner.clone();
+    let udp_app = app.clone();
+    let mut rx_wake = announce_rx.unwrap();
     tauri::async_runtime::spawn(async move {
       let std_sock = match StdUdpSocket::bind(("0.0.0.0", UDP_DISCOVERY_PORT))
         .or_else(|_| StdUdpSocket::bind(("0.0.0.0", 0)))
@@ -654,34 +754,56 @@ pub async fn sync_start(
         Err(_) => return,
       };
 
-      // Broadcaster task
+      // Broadcaster task: wakes immediately on announce_tx (data change / foreground resume)
+      // plus low-cost LAN presence beacon every 5s.
       let tx_sock = sock.clone();
       let tx_state = udp_state.clone();
       tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+          tokio::select! {
+            _ = interval.tick() => {
+              send_udp_beacon(&tx_sock, &tx_state).await;
+            }
+            maybe = rx_wake.recv() => {
+              if maybe.is_none() {
+                break;
+              }
+              // Drain coalesced wake signals
+              while rx_wake.try_recv().is_ok() {}
+              send_udp_beacon(&tx_sock, &tx_state).await;
+            }
+          }
+        }
+      });
+
+      // Stale peer offline detector (pure in-memory check, zero network traffic)
+      let reaper_state = udp_state.clone();
+      let reaper_app = udp_app.clone();
+      tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(6));
         loop {
           interval.tick().await;
-          let beacon = {
-            let g = tx_state.lock().unwrap();
-            UdpBeacon {
-              app: "readingbook".into(),
-              v: 2,
-              device_id: g.device_id.clone(),
-              device_name: g.device_name.clone(),
-              http_port: g.http_port,
+          let ts = now_ms();
+          let dropped_paired: Vec<String> = {
+            let mut g = reaper_state.lock().unwrap();
+            let mut stale_ids = Vec::new();
+            for (id, peer) in &g.discovered {
+              if ts.saturating_sub(peer.last_seen_ms) > PEER_STALE_MS {
+                stale_ids.push(id.clone());
+              }
             }
+            let mut paired_dropped = Vec::new();
+            for id in stale_ids {
+              g.discovered.remove(&id);
+              if g.peer_secrets.contains_key(&id) {
+                paired_dropped.push(id);
+              }
+            }
+            paired_dropped
           };
-          if let Ok(bytes) = serde_json::to_vec(&beacon) {
-            let _ = tx_sock
-              .send_to(&bytes, ("255.255.255.255", UDP_DISCOVERY_PORT))
-              .await;
-            if let Some(local) = detect_local_ipv4() {
-              let octets = local.octets();
-              let directed = Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
-              let _ = tx_sock
-                .send_to(&bytes, (directed, UDP_DISCOVERY_PORT))
-                .await;
-            }
+          for device_id in dropped_paired {
+            let _ = reaper_app.emit("sync-peer-offline", PeerOfflineEvent { device_id });
           }
         }
       });
@@ -694,21 +816,54 @@ pub async fn sync_start(
             if beacon.app != "readingbook" || beacon.v != 2 {
               continue;
             }
-            let mut g = udp_state.lock().unwrap();
-            if beacon.device_id == g.device_id {
-              continue;
-            }
+            let ip_str = addr.ip().to_string();
             let ts = now_ms();
-            g.discovered.insert(
-              beacon.device_id.clone(),
-              DiscoveredPeer {
-                device_id: beacon.device_id,
-                device_name: beacon.device_name,
-                ip: addr.ip().to_string(),
-                http_port: beacon.http_port,
-                last_seen_ms: ts,
-              },
-            );
+            let signal = {
+              let mut g = udp_state.lock().unwrap();
+              if beacon.device_id == g.device_id {
+                continue;
+              }
+              let prev = g.discovered.get(&beacon.device_id).cloned();
+              let is_paired = g.peer_secrets.contains_key(&beacon.device_id);
+              let reason = match prev {
+                None => Some("online"),
+                Some(ref p) if ts.saturating_sub(p.last_seen_ms) > PEER_STALE_MS => Some("online"),
+                Some(ref p) if p.ip != ip_str || p.http_port != beacon.http_port => {
+                  Some("ip_changed")
+                }
+                Some(ref p) if p.data_rev != beacon.data_rev => Some("rev_changed"),
+                _ => None,
+              };
+
+              g.discovered.insert(
+                beacon.device_id.clone(),
+                DiscoveredPeer {
+                  device_id: beacon.device_id.clone(),
+                  device_name: beacon.device_name.clone(),
+                  ip: ip_str.clone(),
+                  http_port: beacon.http_port,
+                  data_rev: beacon.data_rev,
+                  last_seen_ms: ts,
+                },
+              );
+
+              if is_paired {
+                reason.map(|r| PeerSignalEvent {
+                  device_id: beacon.device_id,
+                  device_name: beacon.device_name,
+                  ip: ip_str,
+                  http_port: beacon.http_port,
+                  data_rev: beacon.data_rev,
+                  reason: r.into(),
+                })
+              } else {
+                None
+              }
+            };
+
+            if let Some(ev) = signal {
+              let _ = udp_app.emit("sync-peer-signal", ev);
+            }
           }
         }
       }
@@ -716,6 +871,34 @@ pub async fn sync_start(
   }
 
   sync_get_status(state).await
+}
+
+#[tauri::command]
+pub async fn sync_set_data_rev(
+  state: State<'_, SyncState>,
+  data_rev: u64,
+) -> Result<(), String> {
+  let tx = {
+    let mut g = state.inner.lock().map_err(|_| "状态锁异常")?;
+    g.data_rev = data_rev;
+    g.announce_tx.clone()
+  };
+  if let Some(sender) = tx {
+    let _ = sender.send(());
+  }
+  Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_announce_now(state: State<'_, SyncState>) -> Result<(), String> {
+  let tx = {
+    let g = state.inner.lock().map_err(|_| "状态锁异常")?;
+    g.announce_tx.clone()
+  };
+  if let Some(sender) = tx {
+    let _ = sender.send(());
+  }
+  Ok(())
 }
 
 #[tauri::command]
@@ -739,6 +922,7 @@ pub async fn sync_get_status(state: State<'_, SyncState>) -> Result<SyncStatus, 
     http_port: if g.http_port == 0 { HTTP_SYNC_PORT } else { g.http_port },
     device_id: g.device_id.clone(),
     device_name: g.device_name.clone(),
+    data_rev: g.data_rev,
     discovered_peers: g.discovered.values().cloned().collect(),
     active_pairing_code,
     pairing_expires_at,
@@ -753,6 +937,16 @@ pub async fn sync_register_peer_secret(
 ) -> Result<(), String> {
   let mut g = state.inner.lock().map_err(|_| "状态锁异常")?;
   g.peer_secrets.insert(peer_device_id, pairing_secret);
+  Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_unregister_peer_secret(
+  state: State<'_, SyncState>,
+  peer_device_id: String,
+) -> Result<(), String> {
+  let mut g = state.inner.lock().map_err(|_| "状态锁异常")?;
+  g.peer_secrets.remove(&peer_device_id);
   Ok(())
 }
 

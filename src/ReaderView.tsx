@@ -36,6 +36,7 @@ import { GalleryModal } from './components/GalleryModal';
 import { ANCHOR_COLORS } from './components/SelectionPopover';
 import { ImageAnnotatorModal } from './components/ImageAnnotatorModal';
 import { SearchModal, type SearchResultAction } from './components/SearchModal';
+import { SyncStatusBadge } from './components/SyncStatusBadge';
 import { TtsPlayerBar } from './components/TtsPlayerBar';
 import {
   BookToCanvasBridge,
@@ -59,6 +60,10 @@ import type {
 } from './types';
 import { invoke } from '@tauri-apps/api/core';
 import { loadAnnotations, saveAnnotations } from './services/db';
+import {
+  subscribeRemoteSyncUpdates,
+  type SyncRuntimeSnapshot,
+} from './services/sync';
 import { EpubImageLoader, parseEpubFile } from './utils/epubLoader';
 import {
   loadEpubImageDims,
@@ -124,9 +129,11 @@ interface PreviewImageState {
 interface ReaderViewProps {
   book: BookRecord;
   settings: ReaderSettings;
+  syncRuntime?: SyncRuntimeSnapshot;
   onBack: () => void;
   onSwitchBook?: (bookId: string) => void;
   onOpenSettings: () => void;
+  onOpenSync?: () => void;
   onSettingsChange: (patch: Partial<ReaderSettings>) => void;
   onProgress: (bookId: string, progress: number, locator: string) => void;
 }
@@ -134,9 +141,11 @@ interface ReaderViewProps {
 export default function ReaderView({
   book,
   settings,
+  syncRuntime,
   onBack,
   onSwitchBook,
   onOpenSettings,
+  onOpenSync,
   onSettingsChange,
   onProgress,
 }: ReaderViewProps) {
@@ -166,6 +175,7 @@ export default function ReaderView({
   const pendingInitialAlignRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
   const dirtyAnnotationsRef = useRef(false);
+  const suppressNextSaveRef = useRef(false);
   const latestAnnotationsRef = useRef<{
     bookId: string;
     anchors: BookAnchor[];
@@ -208,6 +218,12 @@ export default function ReaderView({
   }, [ttsParagraphId]);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [readingProgress, setReadingProgress] = useState<number>(book.progress ?? 0);
+  const readingProgressRef = useRef(readingProgress);
+  readingProgressRef.current = readingProgress;
+  const [remoteProgressPrompt, setRemoteProgressPrompt] = useState<{
+    progress: number;
+    locator: string | null;
+  } | null>(null);
 
   const [docFormat, setDocFormat] = useState<DocFormat>('epub');
   const [bookTitle, setBookTitle] = useState<string>('');
@@ -1814,6 +1830,10 @@ export default function ReaderView({
   useEffect(() => {
     latestAnnotationsRef.current = { bookId: book.id, anchors, cards, edges };
     if (!hydratedRef.current) return;
+    if (suppressNextSaveRef.current) {
+      suppressNextSaveRef.current = false;
+      return;
+    }
     dirtyAnnotationsRef.current = true;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(flushAnnotationsNow, 600);
@@ -1824,6 +1844,35 @@ export default function ReaderView({
       }
     };
   }, [book.id, anchors, cards, edges, flushAnnotationsNow]);
+
+  // Live-refresh annotations and prompt on remote reading progress updates while book is open
+  useEffect(() => {
+    return subscribeRemoteSyncUpdates((updates) => {
+      const match = updates.find((u) => u.bookId === book.id);
+      if (!match) return;
+      if (match.annotationsChanged) {
+        void loadAnnotations(book.id).then(async (saved) => {
+          const restoredCards = saved ? await restoreThumbUrls(saved.cards) : [];
+          suppressNextSaveRef.current = true;
+          setAnchors(saved?.anchors ?? []);
+          setCards(restoredCards);
+          setEdges(saved?.edges ?? []);
+          setTimeout(bumpSync, 80);
+        });
+      }
+      if (
+        match.progressChanged &&
+        match.locator &&
+        typeof match.progress === 'number' &&
+        Math.abs(match.progress - readingProgressRef.current) >= 0.01
+      ) {
+        setRemoteProgressPrompt({
+          progress: match.progress,
+          locator: match.locator,
+        });
+      }
+    });
+  }, [book.id, bumpSync]);
 
   useEffect(() => {
     const handleBeforeUnload = () => flushAnnotationsNow();
@@ -2600,6 +2649,15 @@ export default function ReaderView({
             <Download size={15} />
           </button>
 
+          {syncRuntime && onOpenSync && (
+            <SyncStatusBadge
+              runtime={syncRuntime}
+              variant="icon"
+              className="topbar__icon-btn"
+              onClick={onOpenSync}
+            />
+          )}
+
           <button
             type="button"
             className="topbar__icon-btn"
@@ -3111,6 +3169,35 @@ export default function ReaderView({
           }
         }}
       />
+
+      {remoteProgressPrompt && (
+        <div className="sync-progress-toast" role="status" aria-live="polite">
+          <span>
+            对端已读到 {Math.round(remoteProgressPrompt.progress * 100)}%
+          </span>
+          <button
+            type="button"
+            className="sync-progress-toast__jump"
+            onClick={() => {
+              const parsed = parseLocator(remoteProgressPrompt.locator);
+              applySavedLocator(parsed);
+              setReadingProgress(remoteProgressPrompt.progress);
+              setRemoteProgressPrompt(null);
+              bumpSync();
+            }}
+          >
+            跳转
+          </button>
+          <button
+            type="button"
+            className="sync-progress-toast__close"
+            title="忽略"
+            onClick={() => setRemoteProgressPrompt(null)}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
 
       {/* Built-in Image Annotator Modal (arrows, rectangles, text) */}
       {annotatingImage && (

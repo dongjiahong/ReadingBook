@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
+  AlertCircle,
   CheckCircle2,
   KeyRound,
   Loader2,
@@ -11,14 +12,20 @@ import {
 } from 'lucide-react';
 import {
   deleteSyncPeer,
+  getSyncRuntimeSnapshot,
   listSyncPeers,
-  syncWithPeer,
+  probeOnForeground,
+  setAutoSyncEnabled,
+  subscribeSyncRuntime,
+  triggerManualSyncPeer,
   upsertSyncPeer,
   type DiscoveredPeer,
   type PairedPeerInfo,
+  type SyncRuntimeSnapshot,
   type SyncStatus,
 } from '../services/sync';
 import type { SyncPeerRecord } from '../types';
+import { describeSyncState } from './SyncStatusBadge';
 
 interface SyncModalProps {
   open: boolean;
@@ -28,6 +35,9 @@ interface SyncModalProps {
 
 export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced }) => {
   const [status, setStatus] = useState<SyncStatus | null>(null);
+  const [runtime, setRuntime] = useState<SyncRuntimeSnapshot>(() =>
+    getSyncRuntimeSnapshot()
+  );
   const [peers, setPeers] = useState<SyncPeerRecord[]>([]);
   const [onlineMap, setOnlineMap] = useState<Record<string, boolean>>({});
   const [pairTarget, setPairTarget] = useState<{ ip: string; port: number; name: string } | null>(
@@ -38,6 +48,10 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
   const [busyMsg, setBusyMsg] = useState<string | null>(null);
   const [resultMsg, setResultMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    return subscribeSyncRuntime(setRuntime);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -75,12 +89,22 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
     if (!open) return;
     setErrorMsg(null);
     setResultMsg(null);
+    void probeOnForeground();
     void refresh();
     const timer = window.setInterval(() => {
       void refresh();
     }, 3500);
     return () => window.clearInterval(timer);
   }, [open, refresh]);
+
+  const handleToggleAutoSync = async () => {
+    setErrorMsg(null);
+    try {
+      await setAutoSyncEnabled(!runtime.autoSyncEnabled);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const handleGenerateCode = async () => {
     setErrorMsg(null);
@@ -132,7 +156,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
     setErrorMsg(null);
     setResultMsg(null);
     try {
-      const res = await syncWithPeer(peer, ip, port, (msg) => setBusyMsg(msg));
+      const res = await triggerManualSyncPeer(peer, ip, port);
       setResultMsg(
         `同步完成：拉取 ${res.filesPulled} 个文件，推送 ${res.filesPushed} 个文件`
       );
@@ -151,6 +175,8 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
   const unpairedDiscovered: DiscoveredPeer[] = (status?.discoveredPeers ?? []).filter(
     (d) => !pairedIds.has(d.deviceId)
   );
+  const stateDesc = describeSyncState(runtime);
+  const isBusy = Boolean(busyMsg) || runtime.phase === 'syncing';
 
   return (
     <div className="settings-backdrop" onClick={onClose}>
@@ -175,7 +201,43 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
           </button>
         </div>
 
-        <div className="settings-panel__body">
+        <div className="settings-panel__body sync-modal__body">
+          {/* Live sync state overview */}
+          <div className={`sync-live-card is-${runtime.phase}`}>
+            <div className="sync-live-card__left">
+              {runtime.phase === 'syncing' ? (
+                <Loader2 size={15} className="topbar__spinner sync-live-card__icon" />
+              ) : runtime.phase === 'error' ? (
+                <AlertCircle size={15} className="sync-live-card__icon" />
+              ) : (
+                <span className={`sync-state-dot is-${runtime.phase}`} />
+              )}
+              <div className="sync-live-card__text">
+                <div className="sync-live-card__title">{stateDesc.label}</div>
+                <div className="sync-live-card__sub">{stateDesc.tooltip}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Event-driven auto-sync switch */}
+          <div className="sync-auto-row">
+            <div className="sync-auto-row__text">
+              <div className="sync-auto-row__title">主动自动同步</div>
+              <div className="sync-auto-row__desc">
+                批注变动、进度保存、设备上线或切回前台时自动触发，不做定时轮询
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={runtime.autoSyncEnabled}
+              className={`sync-switch ${runtime.autoSyncEnabled ? 'is-on' : ''}`}
+              onClick={() => void handleToggleAutoSync()}
+            >
+              <span className="sync-switch__thumb" />
+            </button>
+          </div>
+
           <div className="sync-self-card">
             <div>
               <div className="sync-self-card__name">
@@ -204,10 +266,10 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
             </div>
           )}
 
-          {busyMsg && (
+          {(busyMsg || runtime.detail) && (
             <div className="sync-status-banner">
               <Loader2 size={14} className="topbar__spinner" />
-              <span>{busyMsg}</span>
+              <span>{runtime.detail || busyMsg}</span>
             </div>
           )}
 
@@ -218,7 +280,11 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
             </div>
           )}
 
-          {errorMsg && <div className="sync-status-banner is-err">{errorMsg}</div>}
+          {(errorMsg || runtime.lastError) && (
+            <div className="sync-status-banner is-err">
+              {errorMsg || runtime.lastError}
+            </div>
+          )}
 
           <div className="sync-section">
             <div className="sync-section__head">已配对设备</div>
@@ -226,7 +292,9 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
               <div className="sync-empty">暂无已配对设备</div>
             ) : (
               peers.map((peer) => {
-                const online = Boolean(onlineMap[peer.deviceId]);
+                const online =
+                  Boolean(onlineMap[peer.deviceId]) ||
+                  runtime.onlinePeerIds.includes(peer.deviceId);
                 const discovered = status?.discoveredPeers.find(
                   (d) => d.deviceId === peer.deviceId
                 );
@@ -256,10 +324,10 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
                       <button
                         type="button"
                         className="sync-btn sync-btn--primary"
-                        disabled={Boolean(busyMsg)}
+                        disabled={isBusy}
                         onClick={() => void handleSyncPeer(peer)}
                       >
-                        <RefreshCw size={12} />
+                        <RefreshCw size={12} className={isBusy ? 'topbar__spinner' : ''} />
                         <span>立即同步</span>
                       </button>
                       <button
@@ -336,7 +404,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced })
               <button
                 type="button"
                 className="sync-btn sync-btn--primary"
-                disabled={Boolean(busyMsg)}
+                disabled={isBusy}
                 onClick={() => void handlePairSubmit()}
               >
                 确认配对
