@@ -3071,6 +3071,7 @@ export default function ReaderView({
       <TtsPlayerBar
         open={showTts}
         bookId={book.id}
+        bookTitle={bookTitle || book.title}
         initialLocator={book.ttsLocator}
         paragraphs={paragraphs}
         getCurrentVisibleParagraphId={() => {

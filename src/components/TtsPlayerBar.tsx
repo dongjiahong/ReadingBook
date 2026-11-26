@@ -27,6 +27,7 @@ import {
 interface TtsPlayerBarProps {
   open: boolean;
   bookId: string;
+  bookTitle?: string;
   initialLocator?: string | null;
   paragraphs: BookParagraph[];
   getCurrentVisibleParagraphId?: () => string | null;
@@ -39,6 +40,7 @@ const SPEED_OPTIONS = [0.85, 1.0, 1.25, 1.5, 2.0, 2.5];
 export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
   open,
   bookId,
+  bookTitle,
   initialLocator,
   paragraphs,
   getCurrentVisibleParagraphId,
@@ -108,21 +110,25 @@ export const TtsPlayerBar: React.FC<TtsPlayerBarProps> = ({
       return;
     }
 
-    const ctrl = new SentenceTtsController(bookId, (next) => {
-      setPlayState(next);
-      onActiveParaRef.current?.(
-        next.playing && next.sentence ? next.sentence.paragraphId : null
-      );
-      if (next.sentence) {
-        const locator = JSON.stringify({
-          paragraphId: next.sentence.paragraphId,
-          sentenceInParagraph: next.sentence.sentenceInParagraph,
-          voice: voiceRef.current,
-          speed: speedRef.current,
-        });
-        void updateBookTtsLocator(bookId, locator).catch(() => {});
-      }
-    });
+    const ctrl = new SentenceTtsController(
+      bookId,
+      (next) => {
+        setPlayState(next);
+        onActiveParaRef.current?.(
+          next.playing && next.sentence ? next.sentence.paragraphId : null
+        );
+        if (next.sentence) {
+          const locator = JSON.stringify({
+            paragraphId: next.sentence.paragraphId,
+            sentenceInParagraph: next.sentence.sentenceInParagraph,
+            voice: voiceRef.current,
+            speed: speedRef.current,
+          });
+          void updateBookTtsLocator(bookId, locator).catch(() => {});
+        }
+      },
+      bookTitle
+    );
 
     // Align TTS start with the currently visible reading paragraph first.
     let startIdx = 0;

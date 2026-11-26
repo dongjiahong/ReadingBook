@@ -90,7 +90,11 @@ if [[ ! -d "$ROOT_DIR/src-tauri/gen/android" ]]; then
   npx tauri android init
 fi
 
-# 3.5 Sync Android launcher icons only when missing or readingbook.png changed
+# 3.5 Sync Android native overlay (TTS Foreground MediaService, MediaSession, permissions)
+echo "[STEP] Syncing Android native TTS media overlay..."
+bash "$ROOT_DIR/scripts/sync-android-overlay.sh"
+
+# 3.6 Sync Android launcher icons only when missing or readingbook.png changed
 ANDROID_ICON_CHECK="$ROOT_DIR/src-tauri/gen/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
 if [[ -f "$ROOT_DIR/readingbook.png" ]] && [[ ! -f "$ANDROID_ICON_CHECK" || "$ROOT_DIR/readingbook.png" -nt "$ANDROID_ICON_CHECK" ]]; then
   echo "[STEP] Syncing Android launcher icons from readingbook.png..."

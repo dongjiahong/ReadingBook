@@ -185,22 +185,68 @@ export function parseTtsLocator(raw: string | null | undefined): TtsLocator | nu
   }
 }
 
+interface AndroidTtsBridgeApi {
+  isAvailable?: () => boolean;
+  setLoading: (title: string, subtitle: string) => void;
+  playAudio: (base64Mp3: string, speed: number, title: string, subtitle: string) => void;
+  pause: () => void;
+  resume: () => void;
+  setSpeed: (speed: number) => void;
+  stop: () => void;
+}
+
+type AndroidTtsEvent = 'ended' | 'play' | 'pause' | 'prev' | 'next' | 'stop' | 'error';
+
+declare global {
+  interface Window {
+    AndroidTtsBridge?: AndroidTtsBridgeApi;
+    __androidTtsEvent?: (event: AndroidTtsEvent) => void;
+  }
+}
+
+function getAndroidTtsBridge(): AndroidTtsBridgeApi | null {
+  if (typeof window === 'undefined') return null;
+  const bridge = window.AndroidTtsBridge;
+  if (bridge && typeof bridge.isAvailable === 'function' && bridge.isAvailable()) {
+    return bridge;
+  }
+  return null;
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const res = typeof reader.result === 'string' ? reader.result : '';
+      const comma = res.indexOf(',');
+      resolve(comma >= 0 ? res.slice(comma + 1) : res);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('音频编码失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
 /**
  * Online Edge Neural TTS controller:
  * - Fetches 24kHz MP3 chunks via pure-Rust `msedge-tts` (`tts_synthesize`).
  * - Persists up to 20 lookahead chunks in IndexedDB (`ttsCache.ts`):
  *   unplayed chunks stay cached across sessions; played chunks auto-expire after 2 hours.
- * - Immediately revokes in-memory Blob URLs after playback to keep RAM flat.
- * - Adjusts speed (0.85x–2.5x) instantaneously on HTMLAudioElement with pitch preservation.
+ * - On Android, routes audio playback through native `TtsMediaService` (MediaPlayer +
+ *   Foreground Service + MediaSession + WakeLock) for lockscreen/status-bar controls and
+ *   uninterrupted background/screen-off playback.
+ * - On macOS/desktop, plays via HTMLAudioElement with instant pitch-preserving speed.
  */
 export class SentenceTtsController {
   private bookId: string;
+  private bookTitle: string;
   private sentences: TtsSentence[] = [];
   private currentIndex = 0;
   private voice = DEFAULT_EDGE_VOICE;
   private speed = 1.0;
   private playing = false;
   private generation = 0;
+  private activeGen = 0;
+  private nativePaused = false;
 
   private audio: HTMLAudioElement | null = null;
   private activeAudioUrl: string | null = null;
@@ -219,10 +265,15 @@ export class SentenceTtsController {
 
   constructor(
     bookId: string,
-    onStateChange: SentenceTtsController['onStateChange']
+    onStateChange: SentenceTtsController['onStateChange'],
+    bookTitle?: string
   ) {
     this.bookId = bookId;
+    this.bookTitle = bookTitle?.trim() || 'ReadingBook 听书';
     this.onStateChange = onStateChange;
+    if (getAndroidTtsBridge()) {
+      window.__androidTtsEvent = (event) => this.handleAndroidEvent(event);
+    }
     // Prune any >2h played chunks on startup and periodically every 10 min
     void pruneExpiredTtsCache();
     this.pruneTimer = window.setInterval(() => {
@@ -230,8 +281,14 @@ export class SentenceTtsController {
     }, 10 * 60 * 1000);
   }
 
+  setBookTitle(title: string): void {
+    const trimmed = title.trim();
+    if (trimmed) this.bookTitle = trimmed;
+  }
+
   setSentences(sentences: TtsSentence[], startIndex = 0): void {
     this.stopPlaybackOnly();
+    this.nativePaused = false;
     this.inflight.clear();
     this.prefetchRunning = false;
     this.sentences = sentences;
@@ -244,6 +301,7 @@ export class SentenceTtsController {
     this.voice = voice;
     const wasPlaying = this.playing;
     this.generation += 1;
+    this.nativePaused = false;
     this.stopPlaybackOnly();
     this.inflight.clear();
     this.prefetchRunning = false;
@@ -257,7 +315,10 @@ export class SentenceTtsController {
   setSpeed(speed: number): void {
     if (this.speed === speed) return;
     this.speed = speed;
-    if (this.audio) {
+    const bridge = getAndroidTtsBridge();
+    if (bridge) {
+      bridge.setSpeed(speed);
+    } else if (this.audio) {
       this.audio.playbackRate = speed;
       (this.audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
     }
@@ -266,15 +327,33 @@ export class SentenceTtsController {
 
   async play(fromIndex?: number): Promise<void> {
     if (this.sentences.length === 0) return;
+    const bridge = getAndroidTtsBridge();
+    if (bridge && fromIndex === undefined && this.nativePaused && !this.playing) {
+      this.playing = true;
+      this.nativePaused = false;
+      bridge.resume();
+      this.emit(false, null);
+      return;
+    }
     if (typeof fromIndex === 'number') {
       this.currentIndex = Math.max(0, Math.min(fromIndex, this.sentences.length - 1));
     }
+    this.nativePaused = false;
     this.playing = true;
     const gen = ++this.generation;
+    this.activeGen = gen;
     await this.playIndex(this.currentIndex, gen);
   }
 
   pause(): void {
+    const bridge = getAndroidTtsBridge();
+    if (bridge) {
+      this.playing = false;
+      this.nativePaused = true;
+      bridge.pause();
+      this.emit(false, null);
+      return;
+    }
     this.playing = false;
     this.generation += 1;
     if (this.audio) {
@@ -286,6 +365,7 @@ export class SentenceTtsController {
   async next(): Promise<void> {
     if (this.currentIndex + 1 >= this.sentences.length) return;
     this.currentIndex += 1;
+    this.nativePaused = false;
     if (this.playing) {
       await this.play(this.currentIndex);
     } else {
@@ -296,6 +376,7 @@ export class SentenceTtsController {
   async prev(): Promise<void> {
     if (this.currentIndex <= 0) return;
     this.currentIndex -= 1;
+    this.nativePaused = false;
     if (this.playing) {
       await this.play(this.currentIndex);
     } else {
@@ -305,13 +386,95 @@ export class SentenceTtsController {
 
   dispose(): void {
     this.playing = false;
+    this.nativePaused = false;
     this.generation += 1;
+    const bridge = getAndroidTtsBridge();
+    if (bridge) {
+      bridge.stop();
+      if (window.__androidTtsEvent) {
+        window.__androidTtsEvent = undefined;
+      }
+    }
     this.stopPlaybackOnly();
     this.inflight.clear();
     this.prefetchRunning = false;
     if (this.pruneTimer !== null) {
       window.clearInterval(this.pruneTimer);
       this.pruneTimer = null;
+    }
+  }
+
+  private buildSubtitle(sentence: TtsSentence | null): string {
+    const total = this.sentences.length;
+    const pct = total > 0 ? Math.round(((this.currentIndex + 1) / total) * 100) : 0;
+    const prefix = total > 0 ? `${this.currentIndex + 1}/${total} (${pct}%)` : '';
+    const snippet = sentence?.text?.trim().slice(0, 64) ?? '';
+    return prefix && snippet ? `${prefix} · ${snippet}` : snippet || prefix || '正在朗读';
+  }
+
+  private handleAndroidEvent(event: AndroidTtsEvent): void {
+    switch (event) {
+      case 'ended': {
+        if (!this.playing) return;
+        const current = this.sentences[this.currentIndex];
+        if (current) {
+          const cacheKey = this.keyFor(current);
+          void markTtsChunkPlayed(cacheKey).then(() => pruneExpiredTtsCache());
+        }
+        if (this.currentIndex + 1 < this.sentences.length) {
+          void this.playIndex(this.currentIndex + 1, this.activeGen);
+        } else {
+          this.playing = false;
+          this.nativePaused = false;
+          getAndroidTtsBridge()?.stop();
+          this.emit(false, null);
+        }
+        break;
+      }
+      case 'pause': {
+        this.playing = false;
+        this.nativePaused = true;
+        this.emit(false, null);
+        break;
+      }
+      case 'play': {
+        if (this.playing) return;
+        if (this.nativePaused) {
+          this.playing = true;
+          this.nativePaused = false;
+          this.emit(false, null);
+        } else {
+          void this.play();
+        }
+        break;
+      }
+      case 'next': {
+        if (this.currentIndex + 1 < this.sentences.length) {
+          this.nativePaused = false;
+          void this.play(this.currentIndex + 1);
+        }
+        break;
+      }
+      case 'prev': {
+        if (this.currentIndex > 0) {
+          this.nativePaused = false;
+          void this.play(this.currentIndex - 1);
+        }
+        break;
+      }
+      case 'stop': {
+        this.playing = false;
+        this.nativePaused = false;
+        this.generation += 1;
+        this.emit(false, null);
+        break;
+      }
+      case 'error': {
+        this.playing = false;
+        this.nativePaused = false;
+        this.emit(false, '音频播放失败');
+        break;
+      }
     }
   }
 
@@ -416,6 +579,11 @@ export class SentenceTtsController {
     this.currentIndex = index;
     const sentence = this.sentences[index];
     const cacheKey = this.keyFor(sentence);
+    const bridge = getAndroidTtsBridge();
+
+    if (bridge) {
+      bridge.setLoading(this.bookTitle, this.buildSubtitle(sentence));
+    }
     this.emit(true, null);
 
     let blob: Blob | null = null;
@@ -424,6 +592,7 @@ export class SentenceTtsController {
     } catch (err) {
       if (gen !== this.generation) return;
       this.playing = false;
+      bridge?.pause();
       this.emit(false, err instanceof Error ? err.message : String(err));
       return;
     }
@@ -431,6 +600,21 @@ export class SentenceTtsController {
     if (gen !== this.generation || !this.playing || !blob) return;
 
     this.pumpPrefetchLoop(gen);
+
+    if (bridge) {
+      try {
+        const base64 = await blobToBase64(blob);
+        if (gen !== this.generation || !this.playing) return;
+        bridge.playAudio(base64, this.speed, this.bookTitle, this.buildSubtitle(sentence));
+        this.emit(false, null);
+      } catch (err) {
+        if (gen !== this.generation) return;
+        this.playing = false;
+        this.emit(false, err instanceof Error ? err.message : '音频解码失败');
+      }
+      return;
+    }
+
     this.stopPlaybackOnly();
 
     const url = URL.createObjectURL(blob);
