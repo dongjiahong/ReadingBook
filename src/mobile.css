@@ -98,6 +98,27 @@
   padding: 20px 20px 88px 18px;
 }
 
+/* Constrain EPUB images by both width and viewport height on mobile so tall figures never overflow */
+.mobile-reader__content .book-epub-image:not(.book-epub-image--inline) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: calc(
+    100dvh - 140px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)
+  );
+}
+
+.mobile-reader__content .book-epub-image:not(.book-epub-image--inline) .book-epub-image__img,
+.mobile-reader__content .book-epub-image--sized .book-epub-image__img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: calc(
+    100dvh - 140px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)
+  );
+  object-fit: contain;
+}
+
 .mobile-reader__content .pdf-pages-container {
   padding: 8px 8px 88px 8px;
 }
@@ -549,6 +570,10 @@
     aspect-ratio: 16 / 10;
   }
 
+  .gallery-card__media img {
+    object-fit: contain;
+  }
+
   .gallery-card__body {
     padding: 12px 14px 13px;
     gap: 8px;
@@ -584,9 +609,17 @@
 
   .gallery-flashcard__img-wrap {
     flex: 0 0 auto;
-    min-height: 210px;
-    max-height: 46dvh;
+    min-height: 180px;
+    max-height: 48dvh;
     padding: 10px;
+  }
+
+  .gallery-flashcard__img {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: calc(48dvh - 22px);
+    object-fit: contain;
   }
 
   .gallery-flashcard__sidebar {
@@ -661,6 +694,8 @@
 
   .mobile-drawer-host .review-item__thumb {
     max-height: 148px;
+    object-fit: contain;
+    background: var(--bg-subtle);
     border-radius: 7px;
   }
 
@@ -671,10 +706,29 @@
     background: rgba(15, 23, 42, 0.72);
   }
 
-  .image-lightbox-frame,
-  .image-lightbox-img,
+  .image-lightbox-frame {
+    max-width: calc(100vw - 24px);
+    max-height: calc(
+      100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 32px
+    );
+    overflow: hidden;
+  }
+
+  .image-lightbox-img {
+    width: auto;
+    height: auto;
+    max-width: calc(100vw - 26px);
+    max-height: calc(
+      100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 34px
+    );
+    object-fit: contain;
+  }
+
   .image-lightbox-stage {
-    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 32px);
+    max-width: calc(100vw - 26px);
+    max-height: calc(
+      100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 34px
+    );
   }
 
   .img-annotator-backdrop {
