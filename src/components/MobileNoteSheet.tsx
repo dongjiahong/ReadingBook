@@ -1,7 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Check,
   Copy,
+  Hash,
   Highlighter,
+  ImagePlus,
   Maximize2,
   MessageSquarePlus,
   Minimize2,
@@ -36,7 +39,9 @@ interface MobileNoteSheetProps {
   onChangeBody: (cardId: string, body: string) => void;
   onAddChildCard: (parentCardId: string) => void;
   onDeleteCard: (cardId: string) => void;
-  onPreviewImage: (image: CardImage) => void;
+  onAddImages?: (cardId: string, files: FileList | File[]) => void;
+  onRemoveImage?: (cardId: string, imageId: string) => void;
+  onPreviewImage: (cardId: string, image: CardImage) => void;
 }
 
 interface TreeNode {
@@ -64,17 +69,52 @@ export const MobileNoteSheet: React.FC<MobileNoteSheetProps> = ({
   onChangeBody,
   onAddChildCard,
   onDeleteCard,
+  onAddImages,
+  onRemoveImage,
   onPreviewImage,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [focusedCardId, setFocusedCardId] = useState<string | null>(null);
+  const [keyboardMetrics, setKeyboardMetrics] = useState<{
+    insetBottom: number;
+    viewportHeight: number;
+  }>({ insetBottom: 0, viewportHeight: 0 });
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingImageCardIdRef = useRef<string | null>(null);
+  const textareaMapRef = useRef<Map<string, HTMLTextAreaElement>>(new Map());
 
   useEffect(() => {
     if (!anchor) {
       setExpanded(false);
       setCopied(false);
+      setFocusedCardId(null);
     }
   }, [anchor?.id]);
+
+  // Adapt sheet height & bottom padding when Android soft keyboard opens/closes.
+  useEffect(() => {
+    if (!anchor) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+
+    const update = () => {
+      const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      setKeyboardMetrics({
+        insetBottom: inset > 60 ? Math.round(inset) : 0,
+        viewportHeight: Math.round(vv.height),
+      });
+    };
+
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
+  }, [anchor]);
 
   // Build ordered root -> children tree for the linked card
   const treeNodes = useMemo<TreeNode[]>(() => {
@@ -109,21 +149,86 @@ export const MobileNoteSheet: React.FC<MobileNoteSheetProps> = ({
     return result;
   }, [anchor, cards, edges]);
 
+  const activeCardId = useMemo(() => {
+    if (focusedCardId && treeNodes.some((n) => n.card.id === focusedCardId)) {
+      return focusedCardId;
+    }
+    return treeNodes[0]?.card.id ?? null;
+  }, [focusedCardId, treeNodes]);
+
+  const registerTextarea = useCallback(
+    (cardId: string, el: HTMLTextAreaElement | null) => {
+      if (el) textareaMapRef.current.set(cardId, el);
+      else textareaMapRef.current.delete(cardId);
+    },
+    []
+  );
+
+  const handleInsertTag = useCallback(() => {
+    if (!activeCardId) return;
+    const card = treeNodes.find((n) => n.card.id === activeCardId)?.card;
+    if (!card) return;
+    const el = textareaMapRef.current.get(activeCardId);
+    const start = el ? (el.selectionStart ?? card.body.length) : card.body.length;
+    const end = el ? (el.selectionEnd ?? card.body.length) : card.body.length;
+    const prefix = start > 0 && !/\s$/.test(card.body.slice(0, start)) ? ' #' : '#';
+    const next = card.body.slice(0, start) + prefix + card.body.slice(end);
+    onChangeBody(activeCardId, next);
+    requestAnimationFrame(() => {
+      const target = textareaMapRef.current.get(activeCardId);
+      if (!target) return;
+      const caret = start + prefix.length;
+      target.focus();
+      target.setSelectionRange(caret, caret);
+    });
+  }, [activeCardId, treeNodes, onChangeBody]);
+
+  const handleTriggerImagePicker = useCallback((cardId: string) => {
+    pendingImageCardIdRef.current = cardId;
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }, []);
+
   if (!anchor) return null;
 
   const curColor: AnchorColor =
     anchor.color ?? (anchor.style === 'underline' ? 'green' : 'amber');
   const nextStyle: AnnotationStyle =
     anchor.style === 'highlight' ? 'underline' : 'highlight';
+  const keyboardOpen = keyboardMetrics.insetBottom > 0;
+
+  const sheetStyle: React.CSSProperties | undefined = keyboardOpen
+    ? {
+        height: `${Math.max(
+          260,
+          Math.min(
+            Math.round(keyboardMetrics.viewportHeight * (expanded ? 0.94 : 0.78)),
+            keyboardMetrics.viewportHeight - 16
+          )
+        )}px`,
+        maxHeight: `${Math.max(260, keyboardMetrics.viewportHeight - 12)}px`,
+        paddingBottom: 0,
+      }
+    : undefined;
 
   return (
     <div
       className="mobile-sheet-backdrop"
+      style={
+        keyboardOpen
+          ? { paddingBottom: `${keyboardMetrics.insetBottom}px` }
+          : undefined
+      }
       onClick={onClose}
       role="presentation"
     >
       <section
-        className={`mobile-sheet ${expanded ? 'is-expanded' : ''}`}
+        className={`mobile-sheet ${expanded ? 'is-expanded' : ''} ${
+          keyboardOpen ? 'is-keyboard-open' : ''
+        }`}
+        style={sheetStyle}
         role="dialog"
         aria-label="批注详情"
         onClick={(e) => e.stopPropagation()}
@@ -240,20 +345,96 @@ export const MobileNoteSheet: React.FC<MobileNoteSheetProps> = ({
                   card={card}
                   depth={depth}
                   accentColor={SWATCH_HEX[curColor]}
+                  isFocused={activeCardId === card.id}
                   autoFocus={autoFocusCardId === card.id}
                   onAutoFocused={onAutoFocused}
+                  onFocus={() => setFocusedCardId(card.id)}
+                  onRegisterTextarea={registerTextarea}
                   onChangeBody={onChangeBody}
                   onAddChild={onAddChildCard}
+                  onAddImage={
+                    onAddImages ? () => handleTriggerImagePicker(card.id) : undefined
+                  }
+                  onRemoveImage={onRemoveImage}
                   onDelete={(id) => {
                     onDeleteCard(id);
                     if (id === anchor.targetNodeId) onClose();
                   }}
-                  onPreviewImage={onPreviewImage}
+                  onPreviewImage={(img) => onPreviewImage(card.id, img)}
                 />
               ))}
             </div>
           )}
         </div>
+
+        {treeNodes.length > 0 && activeCardId && (
+          <div
+            className="mobile-sheet__toolbar"
+            onMouseDown={(e) => e.preventDefault()}
+          >
+            <button
+              type="button"
+              className="mobile-sheet__tool-btn"
+              onClick={handleInsertTag}
+              title="插入 #标签"
+            >
+              <Hash size={15} />
+              <span>标签</span>
+            </button>
+            {onAddImages && (
+              <button
+                type="button"
+                className="mobile-sheet__tool-btn"
+                onClick={() => handleTriggerImagePicker(activeCardId)}
+                title="从相册或相机添加附图"
+              >
+                <ImagePlus size={15} />
+                <span>插图</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="mobile-sheet__tool-btn"
+              onClick={() => onAddChildCard(activeCardId)}
+              title="在当前卡片下追加子分支"
+            >
+              <Plus size={15} />
+              <span>子卡</span>
+            </button>
+            <div className="mobile-sheet__toolbar-spacer" />
+            <button
+              type="button"
+              className="mobile-sheet__done-btn"
+              onClick={() => {
+                const activeEl = document.activeElement as HTMLElement | null;
+                if (activeEl && activeEl.tagName === 'TEXTAREA') {
+                  activeEl.blur();
+                } else {
+                  onClose();
+                }
+              }}
+            >
+              <Check size={14} />
+              <span>{keyboardOpen ? '收起键盘' : '完成'}</span>
+            </button>
+          </div>
+        )}
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={(e) => {
+            const files = e.target.files;
+            const targetCardId = pendingImageCardIdRef.current ?? activeCardId;
+            if (files && files.length > 0 && targetCardId && onAddImages) {
+              onAddImages(targetCardId, files);
+            }
+            e.target.value = '';
+          }}
+        />
       </section>
     </div>
   );
@@ -263,10 +444,15 @@ interface MobileNoteCardRowProps {
   card: AnnotationCardItem;
   depth: number;
   accentColor: string;
+  isFocused: boolean;
   autoFocus: boolean;
   onAutoFocused: () => void;
+  onFocus: () => void;
+  onRegisterTextarea: (cardId: string, el: HTMLTextAreaElement | null) => void;
   onChangeBody: (cardId: string, body: string) => void;
   onAddChild: (parentCardId: string) => void;
+  onAddImage?: () => void;
+  onRemoveImage?: (cardId: string, imageId: string) => void;
   onDelete: (cardId: string) => void;
   onPreviewImage: (image: CardImage) => void;
 }
@@ -275,10 +461,15 @@ const MobileNoteCardRow: React.FC<MobileNoteCardRowProps> = ({
   card,
   depth,
   accentColor,
+  isFocused,
   autoFocus,
   onAutoFocused,
+  onFocus,
+  onRegisterTextarea,
   onChangeBody,
   onAddChild,
+  onAddImage,
+  onRemoveImage,
   onDelete,
   onPreviewImage,
 }) => {
@@ -288,7 +479,7 @@ const MobileNoteCardRow: React.FC<MobileNoteCardRowProps> = ({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.max(44, el.scrollHeight)}px`;
+    el.style.height = `${Math.max(48, el.scrollHeight)}px`;
   }, [card.body]);
 
   useEffect(() => {
@@ -297,13 +488,16 @@ const MobileNoteCardRow: React.FC<MobileNoteCardRowProps> = ({
     if (el) {
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
     onAutoFocused();
   }, [autoFocus, onAutoFocused]);
 
   return (
     <div
-      className={`mobile-note-card ${depth > 0 ? 'is-child' : ''}`}
+      className={`mobile-note-card ${depth > 0 ? 'is-child' : ''} ${
+        isFocused ? 'is-focused' : ''
+      }`}
       style={{
         marginLeft: `${depth * 14}px`,
         borderLeftColor: depth === 0 ? accentColor : undefined,
@@ -314,6 +508,16 @@ const MobileNoteCardRow: React.FC<MobileNoteCardRowProps> = ({
           {depth === 0 ? '主批注' : `子分支 L${depth}`}
         </span>
         <div className="mobile-note-card__actions">
+          {onAddImage && (
+            <button
+              type="button"
+              className="mobile-note-card__btn"
+              title="添加图片"
+              onClick={onAddImage}
+            >
+              <ImagePlus size={13} />
+            </button>
+          )}
           <button
             type="button"
             className="mobile-note-card__btn"
@@ -335,24 +539,42 @@ const MobileNoteCardRow: React.FC<MobileNoteCardRowProps> = ({
       </div>
 
       <textarea
-        ref={textareaRef}
+        ref={(el) => {
+          textareaRef.current = el;
+          onRegisterTextarea(card.id, el);
+        }}
         className="mobile-note-card__textarea"
         placeholder="记下你的想法（支持 #标签，同步回桌面端自动排版）…"
         value={card.body}
+        onFocus={onFocus}
         onChange={(e) => onChangeBody(card.id, e.target.value)}
       />
 
       {card.images && card.images.length > 0 && (
         <div className="mobile-note-card__images">
           {card.images.map((img) => (
-            <button
-              key={img.id}
-              type="button"
-              className="mobile-note-card__img-btn"
-              onClick={() => onPreviewImage(img)}
-            >
-              <img src={img.thumbUrl} alt="批注附图" loading="lazy" />
-            </button>
+            <div key={img.id} className="mobile-note-card__img-wrap">
+              <button
+                type="button"
+                className="mobile-note-card__img-btn"
+                onClick={() => onPreviewImage(img)}
+              >
+                <img src={img.thumbUrl} alt="批注附图" loading="lazy" />
+              </button>
+              {onRemoveImage && (
+                <button
+                  type="button"
+                  className="mobile-note-card__img-remove"
+                  title="移除附图"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveImage(card.id, img.id);
+                  }}
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
           ))}
         </div>
       )}

@@ -2,6 +2,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { MessageSquarePlus } from 'lucide-react';
 import type { AnchorColor, AnnotationStyle, BookAnchor, BookParagraph } from '../types';
 import type { EpubImageLoader } from '../utils/epubLoader';
+import {
+  MobileSelectionDock,
+  type LinkableCardOption,
+} from './MobileSelectionDock';
 import { SelectionPopover } from './SelectionPopover';
 
 interface SelectionDraft {
@@ -12,6 +16,7 @@ interface SelectionDraft {
   popupX: number;
   popupY: number;
   anchorScreenY: number;
+  crossParagraphTruncated?: boolean;
 }
 
 interface BookPaneProps {
@@ -20,9 +25,11 @@ interface BookPaneProps {
   activeAnchorId: string | null;
   selectedCardId: string | null;
   isDraggingWireToBook: boolean;
+  selectionMode?: 'popover' | 'dock';
+  recentCards?: LinkableCardOption[];
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   epubImageLoader?: EpubImageLoader | null;
-  onPreviewImage?: (blob: Blob, alt: string) => void;
+  onPreviewImage?: (blob: Blob, alt: string, paragraphId?: string) => void;
   onImageLoaded?: (imagePath?: string, width?: number, height?: number) => void;
   onCreateImageCard?: (
     paragraphId: string,
@@ -52,6 +59,8 @@ export const BookPane: React.FC<BookPaneProps> = ({
   activeAnchorId,
   selectedCardId,
   isDraggingWireToBook,
+  selectionMode = 'popover',
+  recentCards = [],
   scrollContainerRef,
   epubImageLoader,
   onPreviewImage,
@@ -63,49 +72,75 @@ export const BookPane: React.FC<BookPaneProps> = ({
 }) => {
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const selectionTimerRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    const handleMouseDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('.selection-popover')) {
-        setSelectionDraft(null);
-      }
-    };
-    window.addEventListener('mousedown', handleMouseDown);
-    return () => window.removeEventListener('mousedown', handleMouseDown);
-  }, []);
-
-  const handleMouseUp = useCallback(() => {
+  const readSelectionDraft = useCallback(() => {
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      if (selectionMode === 'dock') setSelectionDraft(null);
       return;
     }
 
     const range = selection.getRangeAt(0);
-    const selectedText = selection.toString().trim();
-    if (!selectedText) return;
-
-    let node: Node | null = range.startContainer;
-    let paragraphEl: HTMLElement | null = null;
-    while (node) {
-      if (node instanceof HTMLElement && node.dataset.paragraphId) {
-        paragraphEl = node;
-        break;
-      }
-      node = node.parentNode;
+    if (!range.toString().trim()) {
+      if (selectionMode === 'dock') setSelectionDraft(null);
+      return;
     }
 
-    let endNode: Node | null = range.endContainer;
-    let endParagraphEl: HTMLElement | null = null;
-    while (endNode) {
-      if (endNode instanceof HTMLElement && endNode.dataset.paragraphId) {
-        endParagraphEl = endNode;
-        break;
+    const findParagraphEl = (startNode: Node | null): HTMLElement | null => {
+      let node: Node | null = startNode;
+      while (node) {
+        if (node instanceof HTMLElement && node.dataset.paragraphId) {
+          return node;
+        }
+        node = node.parentNode;
       }
-      endNode = endNode.parentNode;
+      return null;
+    };
+
+    const startParaEl = findParagraphEl(range.startContainer);
+    const endParaEl = findParagraphEl(range.endContainer);
+
+    // Ensure selection is inside this BookPane's content container.
+    const host = contentRef.current;
+    if (
+      host &&
+      startParaEl &&
+      !host.contains(startParaEl)
+    ) {
+      return;
     }
 
-    if (!paragraphEl || paragraphEl !== endParagraphEl) {
+    let paragraphEl: HTMLElement | null = startParaEl;
+    let effectiveRange = range;
+    let crossParagraphTruncated = false;
+
+    if (!paragraphEl && endParaEl && (!host || host.contains(endParaEl))) {
+      paragraphEl = endParaEl;
+      const clamped = document.createRange();
+      clamped.setStart(endParaEl, 0);
+      clamped.setEnd(range.endContainer, range.endOffset);
+      effectiveRange = clamped;
+      crossParagraphTruncated = true;
+    } else if (paragraphEl && paragraphEl !== endParaEl) {
+      // On touch devices (and when dragging slightly past a paragraph), clamp to
+      // the first paragraph instead of silently dropping the selection.
+      const clamped = document.createRange();
+      clamped.setStart(range.startContainer, range.startOffset);
+      clamped.setEnd(paragraphEl, paragraphEl.childNodes.length);
+      effectiveRange = clamped;
+      crossParagraphTruncated = true;
+    }
+
+    if (!paragraphEl) {
+      if (selectionMode === 'dock') setSelectionDraft(null);
+      return;
+    }
+
+    const fullSelected = effectiveRange.toString();
+    const selectedText = fullSelected.trim();
+    if (!selectedText) {
+      if (selectionMode === 'dock') setSelectionDraft(null);
       return;
     }
 
@@ -113,16 +148,15 @@ export const BookPane: React.FC<BookPaneProps> = ({
 
     const preRange = document.createRange();
     preRange.selectNodeContents(paragraphEl);
-    preRange.setEnd(range.startContainer, range.startOffset);
+    preRange.setEnd(effectiveRange.startContainer, effectiveRange.startOffset);
     const rawStart = preRange.toString().length;
 
-    const fullSelected = range.toString();
     const leadingSpaces = fullSelected.length - fullSelected.trimStart().length;
     const startOffset = rawStart + leadingSpaces;
     const endOffset = startOffset + selectedText.length;
 
-    const rects = range.getClientRects();
-    const firstRect = rects[0] ?? range.getBoundingClientRect();
+    const rects = effectiveRange.getClientRects();
+    const firstRect = rects[0] ?? effectiveRange.getBoundingClientRect();
     const lastRect = rects[rects.length - 1] ?? firstRect;
 
     setSelectionDraft({
@@ -133,8 +167,46 @@ export const BookPane: React.FC<BookPaneProps> = ({
       popupX: firstRect.left + firstRect.width / 2,
       popupY: Math.max(56, firstRect.top - 10),
       anchorScreenY: lastRect.top + lastRect.height / 2,
+      crossParagraphTruncated,
     });
-  }, []);
+  }, [selectionMode]);
+
+  useEffect(() => {
+    if (selectionMode !== 'popover') return;
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.selection-popover')) {
+        setSelectionDraft(null);
+      }
+    };
+    window.addEventListener('mousedown', handleMouseDown);
+    return () => window.removeEventListener('mousedown', handleMouseDown);
+  }, [selectionMode]);
+
+  // On mobile/touch ('dock' mode), Android selection teardrop drags fire
+  // `selectionchange` continuously rather than `mouseup`/`touchend`.
+  useEffect(() => {
+    if (selectionMode !== 'dock') return;
+    const onSelectionChange = () => {
+      if (selectionTimerRef.current) window.clearTimeout(selectionTimerRef.current);
+      selectionTimerRef.current = window.setTimeout(() => {
+        selectionTimerRef.current = null;
+        readSelectionDraft();
+      }, 140);
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', onSelectionChange);
+      if (selectionTimerRef.current) {
+        window.clearTimeout(selectionTimerRef.current);
+        selectionTimerRef.current = null;
+      }
+    };
+  }, [selectionMode, readSelectionDraft]);
+
+  const handleMouseUp = useCallback(() => {
+    readSelectionDraft();
+  }, [readSelectionDraft]);
 
   const handleAnnotateFromPopover = useCallback(
     (options: {
@@ -386,16 +458,25 @@ export const BookPane: React.FC<BookPaneProps> = ({
         })}
       </div>
 
-      {selectionDraft && (
-        <SelectionPopover
-          x={selectionDraft.popupX}
-          y={selectionDraft.popupY}
-          quote={selectionDraft.quote}
-          selectedCardId={selectedCardId}
-          onAnnotate={handleAnnotateFromPopover}
-          onDismiss={handleDismissPopover}
-        />
-      )}
+      {selectionDraft &&
+        (selectionMode === 'dock' ? (
+          <MobileSelectionDock
+            quote={selectionDraft.quote}
+            crossParagraphTruncated={selectionDraft.crossParagraphTruncated}
+            recentCards={recentCards}
+            onAnnotate={handleAnnotateFromPopover}
+            onDismiss={handleDismissPopover}
+          />
+        ) : (
+          <SelectionPopover
+            x={selectionDraft.popupX}
+            y={selectionDraft.popupY}
+            quote={selectionDraft.quote}
+            selectedCardId={selectedCardId}
+            onAnnotate={handleAnnotateFromPopover}
+            onDismiss={handleDismissPopover}
+          />
+        ))}
     </div>
   );
 };
@@ -404,7 +485,7 @@ interface EpubImageProps {
   paragraph: BookParagraph;
   loader: EpubImageLoader | null;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
-  onPreviewImage?: (blob: Blob, alt: string) => void;
+  onPreviewImage?: (blob: Blob, alt: string, paragraphId?: string) => void;
   onImageLoaded?: (imagePath?: string, width?: number, height?: number) => void;
   onCreateImageCard?: (
     paragraphId: string,
@@ -558,13 +639,13 @@ const EpubImage: React.FC<EpubImageProps> = ({
               e.stopPropagation();
               if (!onPreviewImage) return;
               if (blobRef.current) {
-                onPreviewImage(blobRef.current, paragraph.imageAlt || '');
+                onPreviewImage(blobRef.current, paragraph.imageAlt || '', paragraph.id);
                 return;
               }
               if (paragraph.imageSrc) {
                 fetch(paragraph.imageSrc)
                   .then((res) => res.blob())
-                  .then((blob) => onPreviewImage(blob, paragraph.imageAlt || ''))
+                  .then((blob) => onPreviewImage(blob, paragraph.imageAlt || '', paragraph.id))
                   .catch(() => {});
               }
             }}

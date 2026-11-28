@@ -1,7 +1,12 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { Check, RotateCcw, X } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import type { AnchorColor, AnnotationStyle, BookAnchor, NormalizedPdfRect, TocEntry } from '../types';
+import {
+  MobileSelectionDock,
+  type LinkableCardOption,
+} from './MobileSelectionDock';
 import { SelectionPopover } from './SelectionPopover';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -30,6 +35,14 @@ interface PdfSelectionDraft {
   popupY: number;
   anchorScreenY: number;
 }
+
+interface PendingCropState {
+  pageNumber: number;
+  pageEl: HTMLElement;
+  rect: NormalizedPdfRect;
+}
+
+type CropHandle = 'nw' | 'ne' | 'sw' | 'se' | 'move';
 
 /** PDF bytes come from an in-memory file or straight from the library on disk. */
 export type PdfSource =
@@ -71,6 +84,8 @@ interface PdfBookPaneProps {
   activeAnchorId: string | null;
   selectedCardId: string | null;
   isDraggingWireToBook: boolean;
+  selectionMode?: 'popover' | 'dock';
+  recentCards?: LinkableCardOption[];
   cropMode?: boolean;
   onExitCropMode?: () => void;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -106,6 +121,8 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
   activeAnchorId,
   selectedCardId,
   isDraggingWireToBook,
+  selectionMode = 'popover',
+  recentCards = [],
   cropMode = false,
   onExitCropMode,
   scrollContainerRef,
@@ -122,6 +139,8 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
   const [defaultAspectRatio, setDefaultAspectRatio] = useState<number>(1.414);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<PdfSelectionDraft | null>(null);
+  const selectionTimerRef = useRef<number | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [boxDrag, setBoxDrag] = useState<{
     pageNumber: number;
@@ -131,6 +150,22 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
     currentX: number;
     currentY: number;
   } | null>(null);
+  const [pendingCrop, setPendingCrop] = useState<PendingCropState | null>(null);
+  const cropAdjustRef = useRef<{
+    handle: CropHandle;
+    startX: number;
+    startY: number;
+    origRect: NormalizedPdfRect;
+    pageRect: DOMRect;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!cropMode) {
+      setBoxDrag(null);
+      setPendingCrop(null);
+      cropAdjustRef.current = null;
+    }
+  }, [cropMode]);
 
   // Group anchors by page once instead of filtering per page on every render
   const anchorsByPage = useMemo(() => {
@@ -145,6 +180,7 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
   }, [anchors]);
 
   useEffect(() => {
+    if (selectionMode !== 'popover') return;
     const handleMouseDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest('.selection-popover')) {
@@ -153,7 +189,7 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
     };
     window.addEventListener('mousedown', handleMouseDown);
     return () => window.removeEventListener('mousedown', handleMouseDown);
-  }, []);
+  }, [selectionMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -246,68 +282,18 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
     };
   }, [source]);
 
-  const handleMouseUp = useCallback(() => {
-    if (boxDrag) {
-      const { pageNumber, pageEl, startX, startY, currentX, currentY } = boxDrag;
-      setBoxDrag(null);
-      const pageRect = pageEl.getBoundingClientRect();
-      const left = Math.max(pageRect.left, Math.min(startX, currentX));
-      const top = Math.max(pageRect.top, Math.min(startY, currentY));
-      const right = Math.min(pageRect.right, Math.max(startX, currentX));
-      const bottom = Math.min(pageRect.bottom, Math.max(startY, currentY));
-      const width = right - left;
-      const height = bottom - top;
-
-      if (width > 14 && height > 10) {
-        const normRect: NormalizedPdfRect = {
-          x: (left - pageRect.left) / pageRect.width,
-          y: (top - pageRect.top) / pageRect.height,
-          w: width / pageRect.width,
-          h: height / pageRect.height,
-        };
-        const canvas = pageEl.querySelector<HTMLCanvasElement>('canvas');
-        if (canvas && canvas.width > 0 && canvas.height > 0 && onCreatePdfCropCard) {
-          const sx = Math.round(normRect.x * canvas.width);
-          const sy = Math.round(normRect.y * canvas.height);
-          const sw = Math.max(1, Math.round(normRect.w * canvas.width));
-          const sh = Math.max(1, Math.round(normRect.h * canvas.height));
-          const offscreen = document.createElement('canvas');
-          offscreen.width = sw;
-          offscreen.height = sh;
-          const ctx = offscreen.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-            offscreen.toBlob((blob) => {
-              if (blob) {
-                onCreatePdfCropCard({
-                  pageNumber,
-                  rect: normRect,
-                  blob,
-                  anchorScreenY: top + height / 2,
-                });
-              }
-            }, 'image/png');
-            onExitCropMode?.();
-            return;
-          }
-        }
-        setSelectionDraft({
-          pageNumber,
-          quote: `PDF 第 ${pageNumber} 页选区批注`,
-          rects: [normRect],
-          popupX: left + width / 2,
-          popupY: Math.max(56, top - 10),
-          anchorScreenY: top + height / 2,
-        });
-        onExitCropMode?.();
-        return;
-      }
-    }
-
+  const readPdfSelectionDraft = useCallback(() => {
+    if (cropMode) return;
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      if (selectionMode === 'dock') setSelectionDraft(null);
+      return;
+    }
     const quote = sel.toString().trim();
-    if (!quote) return;
+    if (!quote) {
+      if (selectionMode === 'dock') setSelectionDraft(null);
+      return;
+    }
 
     const range = sel.getRangeAt(0);
     let node: Node | null = range.startContainer;
@@ -319,7 +305,11 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
       }
       node = node.parentNode;
     }
-    if (!pageEl) return;
+    if (!pageEl) {
+      if (selectionMode === 'dock') setSelectionDraft(null);
+      return;
+    }
+    if (containerRef.current && !containerRef.current.contains(pageEl)) return;
 
     const pageNumber = Number(pageEl.dataset.pdfPage);
     const pageRect = pageEl.getBoundingClientRect();
@@ -346,20 +336,213 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
       popupY: Math.max(56, first.top - 10),
       anchorScreenY: last.top + last.height / 2,
     });
-  }, [boxDrag, onCreatePdfCropCard, onExitCropMode]);
+  }, [cropMode, selectionMode]);
+
+  useEffect(() => {
+    if (selectionMode !== 'dock') return;
+    const onSelectionChange = () => {
+      if (selectionTimerRef.current) window.clearTimeout(selectionTimerRef.current);
+      selectionTimerRef.current = window.setTimeout(() => {
+        selectionTimerRef.current = null;
+        readPdfSelectionDraft();
+      }, 140);
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', onSelectionChange);
+      if (selectionTimerRef.current) {
+        window.clearTimeout(selectionTimerRef.current);
+        selectionTimerRef.current = null;
+      }
+    };
+  }, [selectionMode, readPdfSelectionDraft]);
+
+  const commitCropRect = useCallback(
+    (pageNumber: number, pageEl: HTMLElement, normRect: NormalizedPdfRect) => {
+      const pageRect = pageEl.getBoundingClientRect();
+      const top = pageRect.top + normRect.y * pageRect.height;
+      const left = pageRect.left + normRect.x * pageRect.width;
+      const width = normRect.w * pageRect.width;
+      const height = normRect.h * pageRect.height;
+      const canvas = pageEl.querySelector<HTMLCanvasElement>('canvas');
+      if (canvas && canvas.width > 0 && canvas.height > 0 && onCreatePdfCropCard) {
+        const sx = Math.round(normRect.x * canvas.width);
+        const sy = Math.round(normRect.y * canvas.height);
+        const sw = Math.max(1, Math.round(normRect.w * canvas.width));
+        const sh = Math.max(1, Math.round(normRect.h * canvas.height));
+        const offscreen = document.createElement('canvas');
+        offscreen.width = sw;
+        offscreen.height = sh;
+        const ctx = offscreen.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+          offscreen.toBlob((blob) => {
+            if (blob) {
+              onCreatePdfCropCard({
+                pageNumber,
+                rect: normRect,
+                blob,
+                anchorScreenY: top + height / 2,
+              });
+            }
+          }, 'image/png');
+          setPendingCrop(null);
+          onExitCropMode?.();
+          return;
+        }
+      }
+      setPendingCrop(null);
+      setSelectionDraft({
+        pageNumber,
+        quote: `PDF 第 ${pageNumber} 页选区批注`,
+        rects: [normRect],
+        popupX: left + width / 2,
+        popupY: Math.max(56, top - 10),
+        anchorScreenY: top + height / 2,
+      });
+      onExitCropMode?.();
+    },
+    [onCreatePdfCropCard, onExitCropMode]
+  );
+
+  const finishBoxDrag = useCallback(
+    (isTouch: boolean) => {
+      if (!boxDrag) return false;
+      const { pageNumber, pageEl, startX, startY, currentX, currentY } = boxDrag;
+      setBoxDrag(null);
+      const pageRect = pageEl.getBoundingClientRect();
+      const left = Math.max(pageRect.left, Math.min(startX, currentX));
+      const top = Math.max(pageRect.top, Math.min(startY, currentY));
+      const right = Math.min(pageRect.right, Math.max(startX, currentX));
+      const bottom = Math.min(pageRect.bottom, Math.max(startY, currentY));
+      const width = right - left;
+      const height = bottom - top;
+
+      if (width > 14 && height > 10) {
+        const normRect: NormalizedPdfRect = {
+          x: (left - pageRect.left) / pageRect.width,
+          y: (top - pageRect.top) / pageRect.height,
+          w: width / pageRect.width,
+          h: height / pageRect.height,
+        };
+        if (isTouch || selectionMode === 'dock') {
+          setPendingCrop({ pageNumber, pageEl, rect: normRect });
+        } else {
+          commitCropRect(pageNumber, pageEl, normRect);
+        }
+      }
+      return true;
+    },
+    [boxDrag, selectionMode, commitCropRect]
+  );
+
+  const handleMouseUp = useCallback(() => {
+    if (finishBoxDrag(false)) return;
+    readPdfSelectionDraft();
+  }, [finishBoxDrag, readPdfSelectionDraft]);
+
+  const startAdjustCrop = useCallback(
+    (handle: CropHandle, clientX: number, clientY: number) => {
+      if (!pendingCrop) return;
+      cropAdjustRef.current = {
+        handle,
+        startX: clientX,
+        startY: clientY,
+        origRect: { ...pendingCrop.rect },
+        pageRect: pendingCrop.pageEl.getBoundingClientRect(),
+      };
+    },
+    [pendingCrop]
+  );
+
+  const moveAdjustCrop = useCallback((clientX: number, clientY: number) => {
+    const adj = cropAdjustRef.current;
+    if (!adj) return;
+    const dx = (clientX - adj.startX) / Math.max(1, adj.pageRect.width);
+    const dy = (clientY - adj.startY) / Math.max(1, adj.pageRect.height);
+    const r = adj.origRect;
+    const minSize = 0.04;
+    let x1 = r.x;
+    let y1 = r.y;
+    let x2 = r.x + r.w;
+    let y2 = r.y + r.h;
+
+    if (adj.handle === 'move') {
+      const clampedDx = Math.max(-r.x, Math.min(1 - (r.x + r.w), dx));
+      const clampedDy = Math.max(-r.y, Math.min(1 - (r.y + r.h), dy));
+      x1 = r.x + clampedDx;
+      y1 = r.y + clampedDy;
+      x2 = x1 + r.w;
+      y2 = y1 + r.h;
+    } else {
+      if (adj.handle === 'nw' || adj.handle === 'sw') {
+        x1 = Math.max(0, Math.min(x2 - minSize, r.x + dx));
+      }
+      if (adj.handle === 'ne' || adj.handle === 'se') {
+        x2 = Math.min(1, Math.max(x1 + minSize, r.x + r.w + dx));
+      }
+      if (adj.handle === 'nw' || adj.handle === 'ne') {
+        y1 = Math.max(0, Math.min(y2 - minSize, r.y + dy));
+      }
+      if (adj.handle === 'sw' || adj.handle === 'se') {
+        y2 = Math.min(1, Math.max(y1 + minSize, r.y + r.h + dy));
+      }
+    }
+
+    setPendingCrop((prev) =>
+      prev
+        ? {
+            ...prev,
+            rect: { x: x1, y: y1, w: x2 - x1, h: y2 - y1 },
+          }
+        : null
+    );
+  }, []);
+
+  const endAdjustCrop = useCallback(() => {
+    cropAdjustRef.current = null;
+  }, []);
 
   const availableWidth = Math.max(280, containerWidth - 40);
 
   return (
     <div
+      ref={containerRef}
       className={`book-pane ${isDraggingWireToBook ? 'book-pane--drop-target' : ''} ${
         cropMode ? 'book-pane--crop-mode' : ''
       }`}
-      onMouseUp={handleMouseUp}
+      onMouseUp={() => {
+        endAdjustCrop();
+        handleMouseUp();
+      }}
+      onTouchMove={(e) => {
+        if (cropAdjustRef.current && e.touches.length > 0) {
+          e.preventDefault();
+          const t = e.touches[0];
+          moveAdjustCrop(t.clientX, t.clientY);
+          return;
+        }
+        if (boxDrag && e.touches.length > 0) {
+          e.preventDefault();
+          const t = e.touches[0];
+          setBoxDrag((prev) =>
+            prev ? { ...prev, currentX: t.clientX, currentY: t.clientY } : null
+          );
+        }
+      }}
       onTouchEnd={() => {
-        window.setTimeout(handleMouseUp, 120);
+        if (cropAdjustRef.current) {
+          endAdjustCrop();
+          return;
+        }
+        if (finishBoxDrag(true)) return;
+        window.setTimeout(readPdfSelectionDraft, 120);
       }}
       onMouseMove={(e) => {
+        if (cropAdjustRef.current) {
+          moveAdjustCrop(e.clientX, e.clientY);
+          return;
+        }
         if (boxDrag) {
           setBoxDrag((prev) =>
             prev ? { ...prev, currentX: e.clientX, currentY: e.clientY } : null
@@ -375,7 +558,11 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
         )}
         {cropMode && !isDraggingWireToBook && (
           <div className="pdf-drop-hint-banner">
-            拖拽框选 PDF 图表区域直接生成右侧带图卡片（也可随时按住 ⌥ 拖拽，按 Esc 退出）
+            {selectionMode === 'dock'
+              ? pendingCrop
+                ? '拖动四角或选框微调范围，点下方确认裁图建卡'
+                : '单指在页面上拖拽框选图表区域，松开后可微调'
+              : '拖拽框选 PDF 图表区域直接生成右侧带图卡片（也可随时按住 ⌥ 拖拽，按 Esc 退出）'}
           </div>
         )}
         {errorMsg && <div className="book-error-banner">PDF 加载失败：{errorMsg}</div>}
@@ -389,6 +576,12 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
               availableWidth={availableWidth}
               defaultAspectRatio={defaultAspectRatio}
               cropMode={cropMode}
+              pendingCropRect={
+                pendingCrop && pendingCrop.pageNumber === pageNo
+                  ? pendingCrop.rect
+                  : null
+              }
+              onStartAdjustCrop={startAdjustCrop}
               scrollContainerRef={scrollContainerRef}
               anchors={anchorsByPage.get(pageNo) ?? EMPTY_ANCHORS}
               activeAnchorId={activeAnchorId}
@@ -396,6 +589,7 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
               onPreviewImage={onPreviewImage}
               onPageRendered={onPageRendered}
               onStartBoxSelect={(pageEl, clientX, clientY) => {
+                setPendingCrop(null);
                 setBoxDrag({
                   pageNumber: pageNo,
                   pageEl,
@@ -425,29 +619,98 @@ export const PdfBookPane: React.FC<PdfBookPaneProps> = memo(function PdfBookPane
         />
       )}
 
-      {selectionDraft && (
-        <SelectionPopover
-          x={selectionDraft.popupX}
-          y={selectionDraft.popupY}
-          quote={selectionDraft.quote}
-          selectedCardId={selectedCardId}
-          onAnnotate={(options) => {
-            onCreatePdfAnnotation({
-              ...selectionDraft,
-              style: options.style,
-              color: options.color,
-              withCard: options.withCard,
-              linkToExistingNodeId: options.linkToExistingNodeId,
-            });
-            window.getSelection()?.removeAllRanges();
-            setSelectionDraft(null);
-          }}
-          onDismiss={() => {
-            window.getSelection()?.removeAllRanges();
-            setSelectionDraft(null);
-          }}
-        />
+      {cropMode && selectionMode === 'dock' && (
+        <div
+          className="mobile-crop-bar"
+          onTouchStart={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="mobile-crop-bar__btn"
+            onClick={() => {
+              setPendingCrop(null);
+              setBoxDrag(null);
+              onExitCropMode?.();
+            }}
+          >
+            <X size={15} />
+            <span>退出框选</span>
+          </button>
+
+          {pendingCrop && (
+            <>
+              <button
+                type="button"
+                className="mobile-crop-bar__btn"
+                onClick={() => setPendingCrop(null)}
+              >
+                <RotateCcw size={14} />
+                <span>重选</span>
+              </button>
+              <button
+                type="button"
+                className="mobile-crop-bar__btn mobile-crop-bar__btn--primary"
+                onClick={() =>
+                  commitCropRect(
+                    pendingCrop.pageNumber,
+                    pendingCrop.pageEl,
+                    pendingCrop.rect
+                  )
+                }
+              >
+                <Check size={15} />
+                <span>确认建卡</span>
+              </button>
+            </>
+          )}
+        </div>
       )}
+
+      {selectionDraft &&
+        (selectionMode === 'dock' ? (
+          <MobileSelectionDock
+            quote={selectionDraft.quote}
+            recentCards={recentCards}
+            onAnnotate={(options) => {
+              onCreatePdfAnnotation({
+                ...selectionDraft,
+                style: options.style,
+                color: options.color,
+                withCard: options.withCard,
+                linkToExistingNodeId: options.linkToExistingNodeId,
+              });
+              window.getSelection()?.removeAllRanges();
+              setSelectionDraft(null);
+            }}
+            onDismiss={() => {
+              window.getSelection()?.removeAllRanges();
+              setSelectionDraft(null);
+            }}
+          />
+        ) : (
+          <SelectionPopover
+            x={selectionDraft.popupX}
+            y={selectionDraft.popupY}
+            quote={selectionDraft.quote}
+            selectedCardId={selectedCardId}
+            onAnnotate={(options) => {
+              onCreatePdfAnnotation({
+                ...selectionDraft,
+                style: options.style,
+                color: options.color,
+                withCard: options.withCard,
+                linkToExistingNodeId: options.linkToExistingNodeId,
+              });
+              window.getSelection()?.removeAllRanges();
+              setSelectionDraft(null);
+            }}
+            onDismiss={() => {
+              window.getSelection()?.removeAllRanges();
+              setSelectionDraft(null);
+            }}
+          />
+        ))}
     </div>
   );
 });
@@ -461,6 +724,8 @@ interface PdfPageViewProps {
   availableWidth: number;
   defaultAspectRatio: number;
   cropMode: boolean;
+  pendingCropRect: NormalizedPdfRect | null;
+  onStartAdjustCrop: (handle: CropHandle, clientX: number, clientY: number) => void;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   anchors: BookAnchor[];
   activeAnchorId: string | null;
@@ -477,6 +742,8 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
   availableWidth,
   defaultAspectRatio,
   cropMode,
+  pendingCropRect,
+  onStartAdjustCrop,
   scrollContainerRef,
   anchors,
   activeAnchorId,
@@ -661,6 +928,12 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
           onStartBoxSelect(pageCardRef.current, e.clientX, e.clientY);
         }
       }}
+      onTouchStart={(e) => {
+        if (cropMode && !pendingCropRect && e.touches.length === 1 && pageCardRef.current) {
+          const t = e.touches[0];
+          onStartBoxSelect(pageCardRef.current, t.clientX, t.clientY);
+        }
+      }}
       style={{
         position: 'relative',
         width: `${dims.width}px`,
@@ -668,6 +941,7 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
         margin: '16px auto',
         boxShadow: '0 4px 16px rgba(0,0,0,0.08)',
         background: '#fff',
+        touchAction: cropMode ? 'none' : undefined,
       }}
     >
       {isVisible ? (
@@ -676,11 +950,55 @@ const PdfPageView: React.FC<PdfPageViewProps> = memo(function PdfPageView({
           <div
             ref={textLayerRef}
             className="pdf-text-layer"
-            style={{ position: 'absolute', inset: 0, userSelect: 'text' }}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              userSelect: cropMode ? 'none' : 'text',
+              pointerEvents: cropMode ? 'none' : undefined,
+            }}
           />
         </>
       ) : (
         <div className="pdf-page-placeholder">第 {pageNumber} 页</div>
+      )}
+
+      {pendingCropRect && (
+        <div
+          className="pdf-crop-selection"
+          style={{
+            left: `${pendingCropRect.x * 100}%`,
+            top: `${pendingCropRect.y * 100}%`,
+            width: `${pendingCropRect.w * 100}%`,
+            height: `${pendingCropRect.h * 100}%`,
+          }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            onStartAdjustCrop('move', e.clientX, e.clientY);
+          }}
+          onTouchStart={(e) => {
+            if (e.touches.length !== 1) return;
+            e.stopPropagation();
+            const t = e.touches[0];
+            onStartAdjustCrop('move', t.clientX, t.clientY);
+          }}
+        >
+          {(['nw', 'ne', 'sw', 'se'] as const).map((corner) => (
+            <span
+              key={corner}
+              className={`pdf-crop-handle pdf-crop-handle--${corner}`}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                onStartAdjustCrop(corner, e.clientX, e.clientY);
+              }}
+              onTouchStart={(e) => {
+                if (e.touches.length !== 1) return;
+                e.stopPropagation();
+                const t = e.touches[0];
+                onStartAdjustCrop(corner, t.clientX, t.clientY);
+              }}
+            />
+          ))}
+        </div>
       )}
 
       {anchors.map((anchor) => {

@@ -1264,7 +1264,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     const origBounds = getShapeBounds(ctx, origShape, strokeScale);
     let mutated = false;
 
-    const handleMove = (moveEvt: MouseEvent) => {
+    const handleMove = (moveEvt: PointerEvent) => {
       const cur = toImageCoords(moveEvt.clientX, moveEvt.clientY);
       if (!cur) return;
       mutated = true;
@@ -1352,13 +1352,15 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     };
 
     const handleUp = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
       if (mutated) pushHistory(snapshot);
     };
 
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
   };
 
   const startDragMoveShape = (
@@ -1370,7 +1372,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     const origShape = shape;
     let moved = false;
 
-    const handleMove = (moveEvt: MouseEvent) => {
+    const handleMove = (moveEvt: PointerEvent) => {
       const cur = toImageCoords(moveEvt.clientX, moveEvt.clientY);
       if (!cur) return;
       const dx = cur.imgX - startImgX;
@@ -1382,16 +1384,19 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     };
 
     const handleUp = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
       if (moved) pushHistory(snapshot);
     };
 
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
   };
 
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType !== 'mouse') return;
     const canvas = canvasRef.current;
     if (!canvas || textDraft) {
       if (hoverCursor) setHoverCursor(null);
@@ -1459,8 +1464,8 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     }
   };
 
-  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (e.button !== 0) return;
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (textDraft) {
       e.preventDefault();
       commitTextDraft();
@@ -1470,9 +1475,14 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     const pt = toImageCoords(e.clientX, e.clientY);
     if (!canvas || !pt) return;
 
+    const isTouch = e.pointerType !== 'mouse';
     const ctx = canvas.getContext('2d');
     const strokeScale = getStrokeScale(canvas.width, canvas.height);
-    const handleRadius = Math.max(10 * pt.imgPerCss, 10 * strokeScale);
+    const handleRadius = Math.max(
+      (isTouch ? 20 : 10) * pt.imgPerCss,
+      (isTouch ? 18 : 10) * strokeScale
+    );
+    const hitTol = (isTouch ? 16 : 8) * pt.imgPerCss;
 
     // 3-point AB=CD Fib Extension placement
     if (tool === 'fib-ext' && !fibExtDraft && selectedShape) {
@@ -1548,7 +1558,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
     if (tool === 'select') {
       e.preventDefault();
-      const hit = findTopShapeAt(ctx, shapes, pt.imgX, pt.imgY, strokeScale, 8 * pt.imgPerCss);
+      const hit = findTopShapeAt(ctx, shapes, pt.imgX, pt.imgY, strokeScale, hitTol);
       if (hit) {
         setSelectedId(hit.id);
         setColor(hit.color);
@@ -1564,7 +1574,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
 
     if (tool === 'text') {
       e.preventDefault();
-      const hit = findTopShapeAt(ctx, shapes, pt.imgX, pt.imgY, strokeScale, 8 * pt.imgPerCss);
+      const hit = findTopShapeAt(ctx, shapes, pt.imgX, pt.imgY, strokeScale, hitTol);
       if (hit && hit.kind === 'text') {
         openTextEditorForShape(hit);
         return;
@@ -1594,7 +1604,7 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
     const drawColor = color;
     const draftId = nextShapeId();
 
-    const handleMove = (moveEvt: MouseEvent) => {
+    const handleMove = (moveEvt: PointerEvent) => {
       const cur = toImageCoords(moveEvt.clientX, moveEvt.clientY);
       if (!cur) return;
       if (tool === 'arrow') {
@@ -1653,9 +1663,10 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       }
     };
 
-    const handleUp = (upEvt: MouseEvent) => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
+    const handleUp = (upEvt: PointerEvent) => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
       const end = toImageCoords(upEvt.clientX, upEvt.clientY);
       setDraftShape(null);
       if (!end) return;
@@ -1727,8 +1738,9 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
       }
     };
 
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
   };
 
   const handleSave = async () => {
@@ -1938,9 +1950,9 @@ export const ImageAnnotatorModal: React.FC<ImageAnnotatorModalProps> = ({
         <canvas
           ref={canvasRef}
           className="img-annotator-canvas"
-          style={{ cursor: canvasCursor }}
-          onMouseDown={handleCanvasMouseDown}
-          onMouseMove={handleCanvasMouseMove}
+          style={{ cursor: canvasCursor, touchAction: 'none' }}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
           onDoubleClick={handleCanvasDoubleClick}
         />
         {textDraft && (

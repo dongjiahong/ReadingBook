@@ -2,10 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   Bookmark,
+  Crop,
   Headphones,
   Images,
   ListTree,
   Loader2,
+  MessageSquarePlus,
+  Pencil,
   Search,
   Settings,
   X,
@@ -15,7 +18,9 @@ import { AnchorMinimap } from './components/AnchorMinimap';
 import { AnnotationDrawer } from './components/AnnotationDrawer';
 import { BookPane } from './components/BookPane';
 import { GalleryModal } from './components/GalleryModal';
+import { ImageAnnotatorModal } from './components/ImageAnnotatorModal';
 import { MobileNoteSheet } from './components/MobileNoteSheet';
+import type { LinkableCardOption } from './components/MobileSelectionDock';
 import { PdfBookPane, type PdfSource } from './components/PdfBookPane';
 import { SearchModal, type SearchResultAction } from './components/SearchModal';
 import { SyncStatusBadge } from './components/SyncStatusBadge';
@@ -159,7 +164,25 @@ export default function MobileReaderView({
   const [showGallery, setShowGallery] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showTts, setShowTts] = useState(false);
+  const [cropMode, setCropMode] = useState(false);
   const [ttsParagraphId, setTtsParagraphId] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToastMessage(null);
+    }, 1800);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     const host = contentHostRef.current;
@@ -174,9 +197,21 @@ export default function MobileReaderView({
       if (activeEl) activeEl.setAttribute('data-tts-active', 'true');
     }
   }, [ttsParagraphId]);
-  const [previewImage, setPreviewImage] = useState<{ url: string; alt: string } | null>(
-    null
-  );
+
+  const [previewImage, setPreviewImage] = useState<{
+    url: string;
+    alt: string;
+    cardId?: string;
+    imageId?: string;
+    epubParagraphId?: string;
+    epubBlob?: Blob;
+  } | null>(null);
+
+  const [annotatingImage, setAnnotatingImage] = useState<{
+    cardId: string;
+    imageId: string;
+    url: string;
+  } | null>(null);
 
   const closePreview = useCallback(() => {
     setPreviewImage((prev) => {
@@ -185,8 +220,16 @@ export default function MobileReaderView({
     });
   }, []);
 
+  const closeAnnotator = useCallback(() => {
+    setAnnotatingImage((prev) => {
+      if (prev) revokeObjectUrlIfBlob(prev.url);
+      return null;
+    });
+  }, []);
+
   // Layered Android back-gesture navigation: close top-most overlay first, then exit to shelf.
   useBackHandler(true, onBack);
+  useBackHandler(cropMode, () => setCropMode(false));
   useBackHandler(showTts, () => {
     setShowTts(false);
     setTtsParagraphId(null);
@@ -196,6 +239,7 @@ export default function MobileReaderView({
   useBackHandler(showSearch, () => setShowSearch(false));
   useBackHandler(sheetAnchorId !== null, () => setSheetAnchorId(null));
   useBackHandler(previewImage !== null, closePreview);
+  useBackHandler(annotatingImage !== null, closeAnnotator);
 
   const revokeCardUrls = useCallback((list: AnnotationCardItem[]) => {
     for (const card of list) {
@@ -511,14 +555,31 @@ export default function MobileReaderView({
     [book.id]
   );
 
-  // Create annotation (highlight/underline, optionally with a mobile-created card)
+  // Create annotation (highlight/underline, optionally with a mobile-created card or linked to existing card)
   const createAnchorAndOptionalCard = useCallback(
     (
       anchorMeta: Omit<BookAnchor, 'id' | 'badgeNumber' | 'kind' | 'targetNodeId'>,
-      withCard: boolean
+      withCard: boolean,
+      linkToExistingNodeId?: string
     ) => {
       const kind = anchorMeta.style === 'highlight' ? 'review' : 'revision';
       const anchorId = `anchor-${Date.now()}`;
+
+      if (linkToExistingNodeId) {
+        const targetCard = cardsRef.current.find((c) => c.id === linkToExistingNodeId);
+        const newAnchor: BookAnchor = {
+          ...anchorMeta,
+          id: anchorId,
+          badgeNumber: targetCard?.badgeNumber ?? 0,
+          kind: targetCard?.kind ?? kind,
+          targetNodeId: linkToExistingNodeId,
+        };
+        setAnchors((prev) => [...prev, newAnchor]);
+        setActiveAnchorId(anchorId);
+        showToast('已关联到已有卡片');
+        return;
+      }
+
       if (!withCard) {
         const newAnchor: BookAnchor = {
           ...anchorMeta,
@@ -528,6 +589,7 @@ export default function MobileReaderView({
         };
         setAnchors((prev) => [...prev, newAnchor]);
         setActiveAnchorId(anchorId);
+        showToast(anchorMeta.style === 'underline' ? '已添加划线' : '已添加高亮');
         return;
       }
 
@@ -557,7 +619,7 @@ export default function MobileReaderView({
       setSheetAnchorId(anchorId);
       setAutoFocusCardId(cardId);
     },
-    [anchors]
+    [anchors, showToast]
   );
 
   const handleCreateTextAnnotation = useCallback(
@@ -570,6 +632,7 @@ export default function MobileReaderView({
       color?: AnchorColor;
       anchorScreenY: number;
       withCard?: boolean;
+      linkToExistingNodeId?: string;
     }) => {
       const para = paragraphs.find((p) => p.id === draft.paragraphId);
       const epubCfi = para?.epubCfiBase
@@ -586,7 +649,8 @@ export default function MobileReaderView({
           style: draft.style,
           color: draft.color,
         },
-        draft.withCard !== false
+        draft.withCard !== false,
+        draft.linkToExistingNodeId
       );
     },
     [paragraphs, createAnchorAndOptionalCard]
@@ -601,6 +665,7 @@ export default function MobileReaderView({
       color?: AnchorColor;
       anchorScreenY: number;
       withCard?: boolean;
+      linkToExistingNodeId?: string;
     }) => {
       createAnchorAndOptionalCard(
         {
@@ -614,10 +679,63 @@ export default function MobileReaderView({
           style: draft.style,
           color: draft.color,
         },
-        draft.withCard !== false
+        draft.withCard !== false,
+        draft.linkToExistingNodeId
       );
     },
     [createAnchorAndOptionalCard]
+  );
+
+  const handleCreatePdfCropCard = useCallback(
+    async (draft: {
+      pageNumber: number;
+      rect: NormalizedPdfRect;
+      blob: Blob;
+      anchorScreenY: number;
+    }) => {
+      const file = new File([draft.blob], `pdf-crop-p${draft.pageNumber}-${Date.now()}.png`, {
+        type: 'image/png',
+      });
+      const imported = await importImageFiles([file]);
+      if (imported.length === 0) return;
+
+      const anchorId = `anchor-${Date.now()}`;
+      const cardId = `card-${Date.now()}`;
+      const badgeNumber = anchors.filter((a) => a.kind === 'thought').length + 1;
+      const newAnchor: BookAnchor = {
+        id: anchorId,
+        docFormat: 'pdf',
+        paragraphId: `pdf-page-${draft.pageNumber}`,
+        pdfPage: draft.pageNumber,
+        pdfRects: [draft.rect],
+        quote: `PDF 第 ${draft.pageNumber} 页图表`,
+        startOffset: 0,
+        endOffset: 0,
+        style: 'pin',
+        color: 'blue',
+        badgeNumber,
+        kind: 'thought',
+        targetNodeId: cardId,
+      };
+      const newCard: AnnotationCardItem = {
+        id: cardId,
+        x: 44,
+        y: 0,
+        kind: 'thought',
+        badgeNumber,
+        body: '',
+        images: imported,
+        anchorId,
+        needsLayout: true,
+      };
+      setAnchors((prev) => [...prev, newAnchor]);
+      setCards((prev) => [...prev, newCard]);
+      setActiveAnchorId(anchorId);
+      setSheetAnchorId(anchorId);
+      setAutoFocusCardId(cardId);
+      showToast('已裁图建卡');
+    },
+    [anchors, showToast]
   );
 
   const handleCreateImageCard = useCallback(
@@ -665,8 +783,9 @@ export default function MobileReaderView({
       setActiveAnchorId(anchorId);
       setSheetAnchorId(anchorId);
       setAutoFocusCardId(cardId);
+      showToast('已生成插图卡片');
     },
-    [anchors]
+    [anchors, showToast]
   );
 
   const handlePromoteAnchor = useCallback(
@@ -753,6 +872,58 @@ export default function MobileReaderView({
     setAutoFocusCardId(childId);
   }, []);
 
+  const handleAddCardImages = useCallback(
+    async (cardId: string, files: FileList | File[]) => {
+      const imported = await importImageFiles(files);
+      if (imported.length === 0) return;
+      setCards((prev) =>
+        prev.map((c) =>
+          c.id === cardId ? { ...c, images: [...(c.images ?? []), ...imported] } : c
+        )
+      );
+      showToast(`已添加 ${imported.length} 张附图`);
+    },
+    [showToast]
+  );
+
+  const handleRemoveCardImage = useCallback((cardId: string, imageId: string) => {
+    const targetCard = cardsRef.current.find((c) => c.id === cardId);
+    const targetImg = targetCard?.images?.find((img) => img.id === imageId);
+    if (targetImg) void deleteStoredImage(targetImg);
+    setCards((prev) =>
+      prev.map((c) =>
+        c.id === cardId
+          ? { ...c, images: (c.images ?? []).filter((img) => img.id !== imageId) }
+          : c
+      )
+    );
+  }, []);
+
+  const handleSaveAnnotatedImage = useCallback(
+    async (file: File) => {
+      if (!annotatingImage) return;
+      const { cardId, imageId } = annotatingImage;
+      const imported = await importImageFiles([file]);
+      if (imported.length === 0) return;
+      const replacement = imported[0];
+      const oldCard = cardsRef.current.find((c) => c.id === cardId);
+      const oldImg = oldCard?.images?.find((img) => img.id === imageId);
+      setCards((prev) =>
+        prev.map((c) => {
+          if (c.id !== cardId) return c;
+          const nextImages = (c.images ?? []).map((img) =>
+            img.id === imageId ? replacement : img
+          );
+          return { ...c, images: nextImages };
+        })
+      );
+      if (oldImg) void deleteStoredImage(oldImg);
+      closeAnnotator();
+      showToast('已保存图片标注');
+    },
+    [annotatingImage, closeAnnotator, showToast]
+  );
+
   const handleDeleteCard = useCallback((cardId: string) => {
     const target = cardsRef.current.find((c) => c.id === cardId);
     if (target) {
@@ -763,22 +934,58 @@ export default function MobileReaderView({
     setAnchors((prev) => prev.filter((a) => a.targetNodeId !== cardId));
   }, []);
 
-  const handlePreviewCardImage = useCallback(async (image: CardImage) => {
-    const url = await createFullImageUrl(image);
-    if (!url) return;
-    setPreviewImage((prev) => {
-      if (prev) revokeObjectUrlIfBlob(prev.url);
-      return { url, alt: '批注附图' };
-    });
-  }, []);
+  const handlePreviewCardImage = useCallback(
+    async (cardId: string, image: CardImage) => {
+      const url = await createFullImageUrl(image);
+      if (!url) return;
+      setPreviewImage((prev) => {
+        if (prev) revokeObjectUrlIfBlob(prev.url);
+        return { url, alt: '批注附图', cardId, imageId: image.id };
+      });
+    },
+    []
+  );
 
-  const handlePreviewBlob = useCallback((blob: Blob, alt: string) => {
-    const url = URL.createObjectURL(blob);
-    setPreviewImage((prev) => {
-      if (prev) revokeObjectUrlIfBlob(prev.url);
-      return { url, alt };
+  const handlePreviewBlob = useCallback(
+    (blob: Blob, alt: string, epubParagraphId?: string) => {
+      const url = URL.createObjectURL(blob);
+      setPreviewImage((prev) => {
+        if (prev) revokeObjectUrlIfBlob(prev.url);
+        return {
+          url,
+          alt,
+          epubParagraphId,
+          epubBlob: epubParagraphId ? blob : undefined,
+        };
+      });
+    },
+    []
+  );
+
+  const recentCards = useMemo<LinkableCardOption[]>(() => {
+    const anchorByCard = new Map<string, BookAnchor>();
+    for (const a of anchors) {
+      if (a.targetNodeId && !anchorByCard.has(a.targetNodeId)) {
+        anchorByCard.set(a.targetNodeId, a);
+      }
+    }
+    const sorted = [...cards].sort(
+      (a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0)
+    );
+    return sorted.slice(0, 6).map((card) => {
+      const bodyLine = card.body.trim().split('\n')[0]?.trim();
+      const quoteLine = anchorByCard.get(card.id)?.quote?.trim();
+      const preview =
+        bodyLine ||
+        quoteLine ||
+        (card.images?.length ? `附图批注 (${card.images.length} 张)` : '空白批注卡');
+      return {
+        id: card.id,
+        preview: preview.length > 48 ? `${preview.slice(0, 48)}…` : preview,
+        badgeNumber: card.badgeNumber,
+      };
     });
-  }, []);
+  }, [cards, anchors]);
 
   const scrollToSelector = useCallback((selector: string) => {
     const host = contentHostRef.current;
@@ -922,10 +1129,17 @@ export default function MobileReaderView({
                 activeAnchorId={activeAnchorId}
                 selectedCardId={null}
                 isDraggingWireToBook={false}
+                selectionMode="dock"
+                recentCards={recentCards}
+                cropMode={cropMode}
+                onExitCropMode={() => setCropMode(false)}
                 scrollContainerRef={scrollRef}
                 onScroll={handleScroll}
                 onPageRendered={() => {}}
                 onCreatePdfAnnotation={handleCreatePdfAnnotation}
+                onCreatePdfCropCard={(draft) => {
+                  void handleCreatePdfCropCard(draft);
+                }}
                 onClickAnchor={(anchor) => {
                   setActiveAnchorId(anchor.id);
                   setSheetAnchorId(anchor.id);
@@ -940,6 +1154,8 @@ export default function MobileReaderView({
                 activeAnchorId={activeAnchorId}
                 selectedCardId={null}
                 isDraggingWireToBook={false}
+                selectionMode="dock"
+                recentCards={recentCards}
                 scrollContainerRef={scrollRef}
                 epubImageLoader={epubImageLoader}
                 onImageLoaded={handleEpubImageLoaded}
@@ -1041,14 +1257,29 @@ export default function MobileReaderView({
           <span>闪卡</span>
         </button>
 
-        <button
-          type="button"
-          className={`mobile-bottom-bar__item ${showTts ? 'is-active' : ''}`}
-          onClick={() => setShowTts((v) => !v)}
-        >
-          <Headphones size={18} />
-          <span>听书</span>
-        </button>
+        {docFormat === 'pdf' ? (
+          <button
+            type="button"
+            className={`mobile-bottom-bar__item ${cropMode ? 'is-active' : ''}`}
+            onClick={() => {
+              setShowToc(false);
+              setShowReviewDrawer(false);
+              setCropMode((v) => !v);
+            }}
+          >
+            <Crop size={18} />
+            <span>{cropMode ? '框选中' : '框选'}</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={`mobile-bottom-bar__item ${showTts ? 'is-active' : ''}`}
+            onClick={() => setShowTts((v) => !v)}
+          >
+            <Headphones size={18} />
+            <span>听书</span>
+          </button>
+        )}
       </nav>
 
       {showToc && (
@@ -1118,7 +1349,9 @@ export default function MobileReaderView({
         onChangeBody={handleChangeBody}
         onAddChildCard={handleAddChildCard}
         onDeleteCard={handleDeleteCard}
-        onPreviewImage={(img) => void handlePreviewCardImage(img)}
+        onAddImages={(cardId, files) => void handleAddCardImages(cardId, files)}
+        onRemoveImage={handleRemoveCardImage}
+        onPreviewImage={(cardId, img) => void handlePreviewCardImage(cardId, img)}
       />
 
       <SearchModal
@@ -1180,6 +1413,12 @@ export default function MobileReaderView({
         </div>
       )}
 
+      {toastMessage && (
+        <div className="mobile-toast" role="status" aria-live="polite">
+          {toastMessage}
+        </div>
+      )}
+
       {previewImage && (
         <div className="image-lightbox-backdrop" onClick={closePreview}>
           <div
@@ -1187,6 +1426,36 @@ export default function MobileReaderView({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="image-lightbox-actions">
+              {previewImage.cardId && previewImage.imageId && (
+                <button
+                  type="button"
+                  className="image-lightbox-pill-btn"
+                  onClick={() => {
+                    const { cardId, imageId, url } = previewImage;
+                    if (!cardId || !imageId) return;
+                    setPreviewImage(null);
+                    setAnnotatingImage({ cardId, imageId, url });
+                  }}
+                >
+                  <Pencil size={13} />
+                  <span>涂鸦标注</span>
+                </button>
+              )}
+              {previewImage.epubParagraphId && previewImage.epubBlob && (
+                <button
+                  type="button"
+                  className="image-lightbox-pill-btn"
+                  onClick={() => {
+                    const { epubParagraphId, epubBlob, alt } = previewImage;
+                    if (!epubParagraphId || !epubBlob) return;
+                    closePreview();
+                    void handleCreateImageCard(epubParagraphId, epubBlob, alt);
+                  }}
+                >
+                  <MessageSquarePlus size={13} />
+                  <span>转成批注卡</span>
+                </button>
+              )}
               <button
                 type="button"
                 className="image-lightbox-action-btn"
@@ -1203,6 +1472,14 @@ export default function MobileReaderView({
             />
           </div>
         </div>
+      )}
+
+      {annotatingImage && (
+        <ImageAnnotatorModal
+          imageUrl={annotatingImage.url}
+          onCancel={closeAnnotator}
+          onSave={handleSaveAnnotatedImage}
+        />
       )}
     </div>
   );
